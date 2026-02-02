@@ -9,12 +9,14 @@ Generate comprehensive release notes by comparing releases across multiple repos
 - **Monorepo releases**: Generate unified release notes from multiple services
 - **Platform releases**: Aggregate changes from multiple repositories into one release document
 - **Automated changelogs**: Create user-friendly release notes automatically
+- **Custom diffs**: Include raw diff content from any source (e.g., configuration changes, external systems)
 
 The Action will:
 1. Fetch the diff between two releases for each configured repository
-2. Send the changes to OpenAI/Azure OpenAI to generate a summary
-3. Combine all summaries into one comprehensive release notes document
-4. Add the release notes to the GitHub Actions job summary
+2. Process any raw diffs provided directly
+3. Send the changes to OpenAI/Azure OpenAI to generate a summary
+4. Combine all summaries into one comprehensive release notes document
+5. Add the release notes to the GitHub Actions job summary
 
 ## How can you use it?
 
@@ -128,7 +130,8 @@ jobs:
 | Input | Description | Required | Default |
 |-------|-------------|----------|---------|
 | `github_token` | The GitHub token for accessing repositories | Yes | - |
-| `repositories` | JSON array of repository configurations (see format below) | Yes | - |
+| `repositories` | JSON array of repository configurations (see format below) | No | `[]` |
+| `raw_diffs` | JSON array of raw diff objects (see format below) | No | `[]` |
 | `openai_api_key` | OpenAI API key (leave empty if using Azure OpenAI) | No | `''` |
 | `azure_openai_api_key` | Azure OpenAI API key (leave empty if using OpenAI) | No | `''` |
 | `azure_openai_endpoint` | Azure OpenAI endpoint | No | `''` |
@@ -139,6 +142,8 @@ jobs:
 | `release_title` | Title for the combined release notes | No | `Release Notes` |
 | `include_diff_stats` | Include diff statistics in output | No | `true` |
 | `custom_prompt` | Custom prompt for generating release notes | No | `''` |
+
+**Note:** At least one of `repositories` or `raw_diffs` must be provided.
 
 ### Repository Configuration Format
 
@@ -155,6 +160,65 @@ Each repository in the `repositories` array should have:
 - `repo`: The repository in `owner/repo` format
 - `from_release`: The source release tag/version
 - `to_release`: The destination release tag/version
+
+### Raw Diffs Configuration Format
+
+Each item in the `raw_diffs` array should have:
+
+```json
+{
+  "name": "config.yaml",
+  "diff": "@@ -1,3 +1,5 @@\n setting1: value1\n+setting2: value2\n+setting3: value3"
+}
+```
+
+- `name`: A filename or identifier for the diff
+- `diff`: The raw diff content (unified diff format recommended)
+
+### Example with Raw Diffs
+
+```yaml
+name: Generate Release Notes with Raw Diffs
+
+on:
+  workflow_dispatch:
+
+jobs:
+  generate-release-notes:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - uses: uug-ai/action-releasenotes@main
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          repositories: |
+            [
+              {"repo": "myorg/backend", "from_release": "v1.0.0", "to_release": "v1.1.0"}
+            ]
+          raw_diffs: |
+            [
+              {"name": "helm-values.yaml", "diff": "@@ -10,6 +10,8 @@\n replicas: 2\n+resources:\n+  limits:\n+    memory: 512Mi"},
+              {"name": "terraform-config.tf", "diff": "@@ -1,4 +1,6 @@\n resource \"aws_instance\" \"main\" {\n+  instance_type = \"t3.medium\"\n }"}
+            ]
+          openai_api_key: ${{ secrets.OPENAI_API_KEY }}
+          release_title: "Platform Release v1.1.0"
+```
+
+### Example with Only Raw Diffs
+
+You can also use the action with only raw diffs (no repository comparisons):
+
+```yaml
+- uses: uug-ai/action-releasenotes@main
+  with:
+    github_token: ${{ secrets.GITHUB_TOKEN }}
+    raw_diffs: |
+      [
+        {"name": "deployment.yaml", "diff": "..."},
+        {"name": "service.yaml", "diff": "..."}
+      ]
+    openai_api_key: ${{ secrets.OPENAI_API_KEY }}
+```
 
 ## Outputs
 

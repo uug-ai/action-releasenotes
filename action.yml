@@ -6,7 +6,12 @@ inputs:
     required: true
   repositories:
     description: 'JSON array of repository configurations. Each item should have: repo (owner/repo), from_release, to_release. Example: [{"repo": "owner/repo1", "from_release": "v1.0.0", "to_release": "v1.1.0"}]'
-    required: true
+    required: false
+    default: '[]'
+  raw_diffs:
+    description: 'JSON array of raw diff objects to include in release notes. Each item should have: name (filename or identifier), diff (the diff content). Example: [{"name": "config.yaml", "diff": "@@ -1,3 +1,5 @@..."}]'
+    required: false
+    default: '[]'
   openai_api_key:
     description: 'OpenAI API key (leave empty if using Azure OpenAI)'
     required: false

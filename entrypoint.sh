@@ -7,6 +7,7 @@ echo "Starting Release Notes Generator..."
 # Debug: Print environment variables (without sensitive data)
 echo "GitHub API URL: $GITHUB_API_URL"
 echo "Repositories config received: ${INPUT_REPOSITORIES:0:100}..."
+echo "Raw diffs config received: ${INPUT_RAW_DIFFS:0:100}..."
 
 # Debug: Check which API keys are provided (without revealing values)
 if [ -n "${INPUT_OPENAI_API_KEY:-}" ]; then
@@ -30,7 +31,8 @@ fi
 /action/generate_releasenotes.py \
   --github-api-url "$GITHUB_API_URL" \
   --github-token "$INPUT_GITHUB_TOKEN" \
-  --repositories "$INPUT_REPOSITORIES" \
+  --repositories "${INPUT_REPOSITORIES:-[]}" \
+  --raw-diffs "${INPUT_RAW_DIFFS:-[]}" \
   --openai-api-key "${INPUT_OPENAI_API_KEY:-}" \
   --azure-openai-api-key "${INPUT_AZURE_OPENAI_API_KEY:-}" \
   --azure-openai-endpoint "${INPUT_AZURE_OPENAI_ENDPOINT:-}" \

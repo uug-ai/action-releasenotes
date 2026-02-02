@@ -325,8 +325,12 @@ def main():
         "--github-token", type=str, required=True, help="The GitHub token"
     )
     parser.add_argument(
-        "--repositories", type=str, required=True, 
+        "--repositories", type=str, required=False, default="[]",
         help="JSON array of repository configurations"
+    )
+    parser.add_argument(
+        "--raw-diffs", type=str, required=False, default="[]",
+        help="JSON array of raw diff objects with 'name' and 'diff' properties"
     )
     parser.add_argument(
         "--openai-api-key", type=str, required=False, default="",
@@ -373,13 +377,20 @@ def main():
     
     # Parse repositories JSON
     try:
-        repositories = json.loads(args.repositories)
+        repositories = json.loads(args.repositories) if args.repositories else []
     except json.JSONDecodeError as e:
         print(f"Error parsing repositories JSON: {e}")
-        return 1
+        repositories = []
     
-    if not repositories:
-        print("No repositories provided")
+    # Parse raw_diffs JSON
+    try:
+        raw_diffs = json.loads(args.raw_diffs) if args.raw_diffs else []
+    except json.JSONDecodeError as e:
+        print(f"Error parsing raw_diffs JSON: {e}")
+        raw_diffs = []
+    
+    if not repositories and not raw_diffs:
+        print("No repositories or raw diffs provided")
         return 1
     
     authorization_header = {
@@ -442,6 +453,54 @@ def main():
                 "stats": stats
             })
             brief_summary_parts.append(f"- **{repo}**: {from_release} → {to_release}")
+    
+    # Process raw diffs
+    if raw_diffs:
+        print(f"\n{'='*60}")
+        print(f"Processing {len(raw_diffs)} raw diff(s)")
+        print(f"{'='*60}")
+        
+        # Combine all raw diffs into a single diff content
+        raw_diff_content = "\n### Raw Diffs\n\n"
+        for raw_diff in raw_diffs:
+            diff_name = raw_diff.get("name", "unknown")
+            diff_content_raw = raw_diff.get("diff", "")
+            
+            if diff_content_raw:
+                raw_diff_content += f"Changes in file {diff_name}:\n{diff_content_raw}\n\n"
+        
+        # Generate AI summary for raw diffs
+        if raw_diff_content.strip() != "\n### Raw Diffs\n":
+            summary = generate_ai_summary(
+                raw_diff_content, "Raw Diffs", "N/A", "N/A",
+                args.openai_api_key, args.azure_openai_api_key,
+                args.azure_openai_endpoint, args.azure_openai_version,
+                args.openai_model, args.max_tokens, args.temperature,
+                args.custom_prompt
+            )
+            
+            if summary:
+                # Calculate basic stats for raw diffs
+                raw_diff_stats = {
+                    "repo": "Raw Diffs",
+                    "from_release": "N/A",
+                    "to_release": "N/A",
+                    "total_commits": 0,
+                    "files_changed": len(raw_diffs),
+                    "additions": sum(d.get("diff", "").count("+") for d in raw_diffs),
+                    "deletions": sum(d.get("diff", "").count("-") for d in raw_diffs),
+                }
+                all_stats.append(raw_diff_stats)
+                
+                all_summaries.append({
+                    "repo": "Raw Diffs",
+                    "from_release": "N/A",
+                    "to_release": "N/A",
+                    "summary": summary,
+                    "stats": raw_diff_stats,
+                    "raw_diff_files": [d.get("name", "unknown") for d in raw_diffs]
+                })
+                brief_summary_parts.append(f"- **Raw Diffs**: {len(raw_diffs)} file(s)")
     
     if not all_summaries:
         print("No summaries generated")
