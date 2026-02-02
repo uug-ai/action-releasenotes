@@ -7,11 +7,12 @@ import requests
 import argparse
 import json
 import os
+from datetime import datetime
 import openai
 from openai import AzureOpenAI
 
 SAMPLE_PROMPT = """
-Write a brief 3-5 line summary of the key changes in this release. Be concise and focus only on the most important changes.
+Write a brief summary of the key changes in this release. Be concise, complete, and avoid redundancy. Each bullet point should cover a distinct change.
 
 The release comparison is between "v1.0.0" and "v1.1.0" for repository "example/repo" and the following changes took place:
 
@@ -36,10 +37,10 @@ GOOD_SAMPLE_RESPONSE = """
 """
 
 COMPLETION_PROMPT = """
-Write a brief summary of the release changes in 3-5 bullet points maximum.
-Focus only on the most important changes: key new features, significant improvements, and critical bug fixes.
-Be concise - each bullet point should be one line.
-Do NOT include section headers, just bullet points.
+Write a brief summary of the release changes.
+Focus on the most important changes: key new features, significant improvements, and critical bug fixes.
+Be concise - each bullet point should be one line and cover a distinct change without overlapping with others.
+Be complete but not extensive. Do NOT include section headers, just bullet points.
 Go straight to the point. The following changes took place:
 """
 
@@ -130,7 +131,7 @@ def generate_ai_summary(diff_content: str, repo: str, from_release: str, to_rele
     messages = [
         {
             "role": "system",
-            "content": "You are a helpful assistant who writes brief, concise release summaries. Always respond with 3-5 bullet points maximum. No headers, no lengthy explanations - just the key changes."
+            "content": "You are a helpful assistant who writes brief, concise release summaries. Each bullet point should cover a distinct change without overlapping with others. Be complete but not extensive. No headers, no lengthy explanations - just the key changes."
         },
         {"role": "user", "content": SAMPLE_PROMPT},
         {"role": "assistant", "content": GOOD_SAMPLE_RESPONSE},
@@ -340,7 +341,7 @@ def main():
     
     # Build the combined release notes
     combined_notes = f"# {args.release_title}\n\n"
-    combined_notes += f"*Generated on: {os.environ.get('GITHUB_RUN_ID', 'local')}*\n\n"
+    combined_notes += f"*Generated on: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}*\n\n"
     
     # Add overview section
     combined_notes += "## Overview\n\n"
