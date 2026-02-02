@@ -121,10 +121,51 @@ def get_compare_diff(github_api_url: str, repo: str, from_release: str, to_relea
         # Exclude other files by default
         return False
     
+    def is_icon_file(filename: str) -> bool:
+        """Check if file is an icon or image asset."""
+        filename_lower = filename.lower()
+        
+        # Specific icon files
+        icon_files = ['icons.js', 'icons.ts', 'icons.jsx', 'icons.tsx']
+        if any(filename_lower.endswith(f) for f in icon_files):
+            return True
+        
+        # Image asset files
+        icon_extensions = ['.png', '.jpg', '.jpeg', '.gif', '.svg', '.ico', '.webp']
+        for ext in icon_extensions:
+            if filename_lower.endswith(ext):
+                return True
+        
+        return False
+    
+    def is_helm_chart_file(filename: str) -> bool:
+        """Check if file is part of a Helm chart."""
+        filename_lower = filename.lower()
+        helm_patterns = [
+            'chart.yaml', 'chart.yml',
+            'values.yaml', 'values.yml',
+            '/templates/',
+            '/charts/',
+            'helmfile.yaml', 'helmfile.yml',
+        ]
+        return any(pattern in filename_lower for pattern in helm_patterns)
+    
     files = compare_data.get("files", [])
+    
+    # Track special file changes for user awareness
+    icon_changes = []
+    helm_chart_changes = []
     
     for file_info in files:
         filename = file_info.get("filename", "unknown")
+        
+        # Track icon changes
+        if is_icon_file(filename):
+            icon_changes.append(filename)
+        
+        # Track helm chart changes
+        if is_helm_chart_file(filename):
+            helm_chart_changes.append(filename)
         
         # Skip non-business code files
         if not should_include_file(filename):
@@ -141,8 +182,22 @@ def get_compare_diff(github_api_url: str, repo: str, from_release: str, to_relea
         if patch:
             diff_content += f"Changes in file {filename} ({status}, +{additions}/-{deletions}): {patch}\n"
     
+    # Add notes about special file changes that require user attention
+    if icon_changes or helm_chart_changes:
+        diff_content += "\n### Additional Updates Required:\n"
+        if icon_changes:
+            diff_content += f"\n**Icon/Image changes detected** (may require asset updates):\n"
+            for icon_file in icon_changes:
+                diff_content += f"- {icon_file}\n"
+        if helm_chart_changes:
+            diff_content += f"\n**Helm chart changes detected** (may require chart version updates):\n"
+            for helm_file in helm_chart_changes:
+                diff_content += f"- {helm_file}\n"
+    
     stats["additions"] = total_additions
     stats["deletions"] = total_deletions
+    stats["icon_changes"] = icon_changes
+    stats["helm_chart_changes"] = helm_chart_changes
     
     # Also include commit messages as context
     commits = compare_data.get("commits", [])
