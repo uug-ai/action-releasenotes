@@ -82,6 +82,7 @@ def get_compare_diff(github_api_url: str, repo: str, from_release: str, to_relea
     # File patterns to exclude (non-business code)
     excluded_patterns = [
         '.github/',           # GitHub Actions, workflows
+        '.devcontainer/',     # Dev container configurations
         'Dockerfile',         # Container images
         'docker-compose',     # Docker compose files
         '.dockerignore',      # Docker ignore files
@@ -145,11 +146,17 @@ def get_compare_diff(github_api_url: str, repo: str, from_release: str, to_relea
     
     # Also include commit messages as context
     commits = compare_data.get("commits", [])
+    total_commits_count = compare_data.get("total_commits", len(commits))
+    
     if commits:
         diff_content += "\nCommit messages:\n"
-        for commit in commits[:50]:  # Limit to 50 commits to avoid token limits
+        for commit in commits:
             commit_message = commit.get("commit", {}).get("message", "").split("\n")[0]
             diff_content += f"- {commit_message}\n"
+        
+        # Note if there are more commits than returned (GitHub API limits to 250 per compare)
+        if total_commits_count > len(commits):
+            diff_content += f"\n(Note: Showing {len(commits)} of {total_commits_count} total commits)\n"
     
     return diff_content, stats
 
