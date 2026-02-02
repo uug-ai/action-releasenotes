@@ -8,6 +8,25 @@ echo "Starting Release Notes Generator..."
 echo "GitHub API URL: $GITHUB_API_URL"
 echo "Repositories config received: ${INPUT_REPOSITORIES:0:100}..."
 
+# Debug: Check which API keys are provided (without revealing values)
+if [ -n "${INPUT_OPENAI_API_KEY:-}" ]; then
+    echo "OpenAI API key: provided (length: ${#INPUT_OPENAI_API_KEY})"
+else
+    echo "OpenAI API key: not provided"
+fi
+
+if [ -n "${INPUT_AZURE_OPENAI_API_KEY:-}" ]; then
+    echo "Azure OpenAI API key: provided (length: ${#INPUT_AZURE_OPENAI_API_KEY})"
+else
+    echo "Azure OpenAI API key: not provided"
+fi
+
+if [ -n "${INPUT_AZURE_OPENAI_ENDPOINT:-}" ]; then
+    echo "Azure OpenAI endpoint: provided"
+else
+    echo "Azure OpenAI endpoint: not provided"
+fi
+
 /action/generate_releasenotes.py \
   --github-api-url "$GITHUB_API_URL" \
   --github-token "$INPUT_GITHUB_TOKEN" \

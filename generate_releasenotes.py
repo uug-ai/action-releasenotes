@@ -148,9 +148,16 @@ def generate_ai_summary(diff_content: str, repo: str, from_release: str, to_rele
     
     generated_summary = ""
     
-    if openai_api_key:
+    # Check for non-empty API keys (strip whitespace and check for actual content)
+    has_openai_key = openai_api_key and openai_api_key.strip()
+    has_azure_key = azure_openai_api_key and azure_openai_api_key.strip()
+    
+    print(f"Debug: OpenAI API key provided: {has_openai_key}")
+    print(f"Debug: Azure OpenAI API key provided: {has_azure_key}")
+    
+    if has_openai_key:
         print(f"Using OpenAI API for {repo}...")
-        client = openai.OpenAI(api_key=openai_api_key)
+        client = openai.OpenAI(api_key=openai_api_key.strip())
         response = client.chat.completions.create(
             model=model,
             messages=messages,
@@ -159,12 +166,15 @@ def generate_ai_summary(diff_content: str, repo: str, from_release: str, to_rele
         )
         generated_summary = response.choices[0].message.content
         
-    elif azure_openai_api_key:
+    elif has_azure_key:
         print(f"Using Azure OpenAI API for {repo}...")
+        if not azure_openai_endpoint or not azure_openai_endpoint.strip():
+            print("Error: Azure OpenAI endpoint is required when using Azure OpenAI API key")
+            return ""
         client = AzureOpenAI(
-            api_key=azure_openai_api_key,
-            azure_endpoint=azure_openai_endpoint,
-            api_version=azure_openai_version
+            api_key=azure_openai_api_key.strip(),
+            azure_endpoint=azure_openai_endpoint.strip(),
+            api_version=azure_openai_version.strip() if azure_openai_version else "2024-02-15-preview"
         )
         response = client.chat.completions.create(
             model=model,
@@ -175,6 +185,7 @@ def generate_ai_summary(diff_content: str, repo: str, from_release: str, to_rele
         generated_summary = response.choices[0].message.content
     else:
         print("Error: No API key provided (OpenAI or Azure OpenAI)")
+        print("Please ensure you have set either 'openai_api_key' or 'azure_openai_api_key' input")
         return ""
     
     return generated_summary
