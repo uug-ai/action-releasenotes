@@ -79,10 +79,56 @@ def get_compare_diff(github_api_url: str, repo: str, from_release: str, to_relea
     diff_content = f"\n### Repository: {repo}\n"
     diff_content += f"**Comparing:** {from_release} → {to_release}\n\n"
     
+    # File patterns to exclude (non-business code)
+    excluded_patterns = [
+        '.github/',           # GitHub Actions, workflows
+        'Dockerfile',         # Container images
+        'docker-compose',     # Docker compose files
+        '.dockerignore',      # Docker ignore files
+        'Jenkinsfile',        # Jenkins pipelines
+        '.gitlab-ci',         # GitLab CI
+        '.travis',            # Travis CI
+        'azure-pipelines',    # Azure DevOps
+        '.circleci/',         # CircleCI
+        'bitbucket-pipelines', # Bitbucket pipelines
+        'Makefile',           # Build automation
+        '.yml',               # Generic YAML configs (often CI/CD)
+        '.yaml',              # Generic YAML configs (often CI/CD)
+    ]
+    
+    # File extensions to always include (business code)
+    included_extensions = [
+        '.py', '.js', '.ts', '.jsx', '.tsx', '.java', '.go', '.rs', '.rb', '.php',
+        '.cs', '.cpp', '.c', '.h', '.hpp', '.swift', '.kt', '.scala', '.vue',
+        '.sql', '.graphql', '.proto', '.json', '.xml', '.html', '.css', '.scss',
+    ]
+    
+    def should_include_file(filename: str) -> bool:
+        """Check if file should be included in release notes."""
+        filename_lower = filename.lower()
+        
+        # Exclude files matching excluded patterns
+        for pattern in excluded_patterns:
+            if pattern.lower() in filename_lower:
+                return False
+        
+        # Include files with business code extensions
+        for ext in included_extensions:
+            if filename_lower.endswith(ext):
+                return True
+        
+        # Exclude other files by default
+        return False
+    
     files = compare_data.get("files", [])
     
     for file_info in files:
         filename = file_info.get("filename", "unknown")
+        
+        # Skip non-business code files
+        if not should_include_file(filename):
+            continue
+        
         patch = file_info.get("patch", "")
         status = file_info.get("status", "modified")
         additions = file_info.get("additions", 0)
