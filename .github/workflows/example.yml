@@ -24,8 +24,7 @@ jobs:
         id: release_notes
         with:
           # For private repos, use a PAT with 'repo' scope instead of GITHUB_TOKEN
-          # github_token: ${{ secrets.GITHUB_TOKEN }}
-          github_token: ${{ secrets.GH_PAT }}
+          github_token: ${{ secrets.TOKEN }}
           repositories: ${{ github.event.inputs.repositories }}
           # Use OpenAI:
           # openai_api_key: ${{ secrets.OPENAI_API_KEY }}
