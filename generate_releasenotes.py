@@ -1,0 +1,390 @@
+#!/usr/bin/env python3
+"""
+Generate release notes by comparing releases across multiple repositories using AI.
+"""
+import sys
+import requests
+import argparse
+import json
+import os
+import openai
+from openai import AzureOpenAI
+
+SAMPLE_PROMPT = """
+Write release notes focusing on the key changes, new features, bug fixes, and improvements.
+Organize the notes into clear sections and make them user-friendly.
+
+The release comparison is between "v1.0.0" and "v1.1.0" for repository "example/repo" and the following changes took place:
+
+Changes in file src/main.py: @@ -10,6 +10,10 @@ def main():
+     print("Starting application")
++    # Added new logging feature
++    setup_logging()
++    logger.info("Application started")
+     run_app()
+
+Changes in file src/config.py: @@ -5,3 +5,8 @@ DEFAULT_CONFIG = {
+     "debug": False,
++    "log_level": "INFO",
++    "log_file": "app.log",
+ }
+"""
+
+GOOD_SAMPLE_RESPONSE = """
+## What's New
+
+### New Features
+- **Logging System**: Added comprehensive logging support with configurable log levels and file output
+
+### Improvements  
+- Enhanced application startup with proper initialization sequence
+- Added structured logging for better debugging and monitoring
+
+### Configuration Changes
+- New configuration options: `log_level` and `log_file` for customizing logging behavior
+"""
+
+COMPLETION_PROMPT = """
+Write professional release notes for the changes between the two releases.
+Focus on what's new, what's improved, and what's fixed.
+Organize the notes into clear sections (New Features, Improvements, Bug Fixes, Breaking Changes if any).
+Make it user-friendly and easy to understand.
+Go straight to the point. The following changes took place:
+"""
+
+
+def get_compare_diff(github_api_url: str, repo: str, from_release: str, to_release: str, 
+                     authorization_header: dict) -> tuple[str, dict]:
+    """
+    Get the diff between two releases/tags for a repository.
+    Returns the diff content and statistics.
+    """
+    compare_url = f"{github_api_url}/repos/{repo}/compare/{from_release}...{to_release}"
+    
+    print(f"Fetching comparison for {repo}: {from_release} -> {to_release}")
+    
+    response = requests.get(compare_url, headers=authorization_header)
+    
+    if response.status_code != requests.codes.ok:
+        print(f"Failed to get comparison for {repo}: {response.status_code}")
+        print(f"Response: {response.text}")
+        return None, None
+    
+    compare_data = response.json()
+    
+    # Extract statistics
+    stats = {
+        "total_commits": len(compare_data.get("commits", [])),
+        "files_changed": len(compare_data.get("files", [])),
+        "additions": compare_data.get("total_commits", 0),
+        "deletions": 0,
+    }
+    
+    # Calculate additions/deletions from files
+    total_additions = 0
+    total_deletions = 0
+    
+    diff_content = f"\n### Repository: {repo}\n"
+    diff_content += f"**Comparing:** {from_release} → {to_release}\n\n"
+    
+    files = compare_data.get("files", [])
+    
+    for file_info in files:
+        filename = file_info.get("filename", "unknown")
+        patch = file_info.get("patch", "")
+        status = file_info.get("status", "modified")
+        additions = file_info.get("additions", 0)
+        deletions = file_info.get("deletions", 0)
+        
+        total_additions += additions
+        total_deletions += deletions
+        
+        if patch:
+            diff_content += f"Changes in file {filename} ({status}, +{additions}/-{deletions}): {patch}\n"
+    
+    stats["additions"] = total_additions
+    stats["deletions"] = total_deletions
+    
+    # Also include commit messages as context
+    commits = compare_data.get("commits", [])
+    if commits:
+        diff_content += "\nCommit messages:\n"
+        for commit in commits[:50]:  # Limit to 50 commits to avoid token limits
+            commit_message = commit.get("commit", {}).get("message", "").split("\n")[0]
+            diff_content += f"- {commit_message}\n"
+    
+    return diff_content, stats
+
+
+def generate_ai_summary(diff_content: str, repo: str, from_release: str, to_release: str,
+                        openai_api_key: str, azure_openai_api_key: str, 
+                        azure_openai_endpoint: str, azure_openai_version: str,
+                        model: str, max_tokens: int, temperature: float,
+                        custom_prompt: str) -> str:
+    """
+    Generate AI summary for the diff content.
+    """
+    completion_prompt = custom_prompt if custom_prompt else COMPLETION_PROMPT
+    completion_prompt += f"\n\nRepository: {repo}\nComparing: {from_release} → {to_release}\n\n"
+    completion_prompt += diff_content
+    
+    # Truncate if too long (approximate token limit)
+    max_allowed_tokens = 8000
+    characters_per_token = 4
+    max_allowed_characters = max_allowed_tokens * characters_per_token
+    if len(completion_prompt) > max_allowed_characters:
+        completion_prompt = completion_prompt[:max_allowed_characters]
+        print(f"Warning: Prompt truncated to {max_allowed_characters} characters for {repo}")
+    
+    messages = [
+        {
+            "role": "system",
+            "content": "You are a helpful assistant who writes professional release notes. Focus on clarity and user value."
+        },
+        {"role": "user", "content": SAMPLE_PROMPT},
+        {"role": "assistant", "content": GOOD_SAMPLE_RESPONSE},
+        {"role": "user", "content": completion_prompt},
+    ]
+    
+    generated_summary = ""
+    
+    if openai_api_key:
+        print(f"Using OpenAI API for {repo}...")
+        client = openai.OpenAI(api_key=openai_api_key)
+        response = client.chat.completions.create(
+            model=model,
+            messages=messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
+        generated_summary = response.choices[0].message.content
+        
+    elif azure_openai_api_key:
+        print(f"Using Azure OpenAI API for {repo}...")
+        client = AzureOpenAI(
+            api_key=azure_openai_api_key,
+            azure_endpoint=azure_openai_endpoint,
+            api_version=azure_openai_version
+        )
+        response = client.chat.completions.create(
+            model=model,
+            messages=messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
+        generated_summary = response.choices[0].message.content
+    else:
+        print("Error: No API key provided (OpenAI or Azure OpenAI)")
+        return ""
+    
+    return generated_summary
+
+
+def write_github_output(name: str, value: str):
+    """Write output to GitHub Actions output file."""
+    github_output = os.environ.get("GITHUB_OUTPUT")
+    if github_output:
+        with open(github_output, "a") as f:
+            # Handle multiline values
+            delimiter = "EOF"
+            f.write(f"{name}<<{delimiter}\n{value}\n{delimiter}\n")
+    else:
+        print(f"::set-output name={name}::{value}")
+
+
+def write_github_summary(content: str):
+    """Write content to GitHub Actions job summary."""
+    github_step_summary = os.environ.get("GITHUB_STEP_SUMMARY")
+    if github_step_summary:
+        with open(github_step_summary, "a") as f:
+            f.write(content)
+    else:
+        print("GITHUB_STEP_SUMMARY not set, printing to stdout:")
+        print(content)
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Generate release notes by comparing releases across multiple repositories using AI."
+    )
+    parser.add_argument(
+        "--github-api-url", type=str, required=True, help="The GitHub API URL"
+    )
+    parser.add_argument(
+        "--github-token", type=str, required=True, help="The GitHub token"
+    )
+    parser.add_argument(
+        "--repositories", type=str, required=True, 
+        help="JSON array of repository configurations"
+    )
+    parser.add_argument(
+        "--openai-api-key", type=str, required=False, default="",
+        help="The OpenAI API key"
+    )
+    parser.add_argument(
+        "--azure-openai-api-key", type=str, required=False, default="",
+        help="The Azure OpenAI API key"
+    )
+    parser.add_argument(
+        "--azure-openai-endpoint", type=str, required=False, default="",
+        help="The Azure OpenAI endpoint"
+    )
+    parser.add_argument(
+        "--azure-openai-version", type=str, required=False, default="2024-02-15-preview",
+        help="The Azure OpenAI API version"
+    )
+    parser.add_argument(
+        "--openai-model", type=str, required=False, default="gpt-4o",
+        help="The OpenAI model to use"
+    )
+    parser.add_argument(
+        "--max-tokens", type=int, required=False, default=2000,
+        help="Maximum tokens for completion"
+    )
+    parser.add_argument(
+        "--temperature", type=float, required=False, default=0.6,
+        help="Temperature for the model"
+    )
+    parser.add_argument(
+        "--release-title", type=str, required=False, default="Release Notes",
+        help="Title for the combined release notes"
+    )
+    parser.add_argument(
+        "--include-diff-stats", type=str, required=False, default="true",
+        help="Include diff statistics in output"
+    )
+    parser.add_argument(
+        "--custom-prompt", type=str, required=False, default="",
+        help="Custom prompt for generating release notes"
+    )
+    
+    args = parser.parse_args()
+    
+    # Parse repositories JSON
+    try:
+        repositories = json.loads(args.repositories)
+    except json.JSONDecodeError as e:
+        print(f"Error parsing repositories JSON: {e}")
+        return 1
+    
+    if not repositories:
+        print("No repositories provided")
+        return 1
+    
+    authorization_header = {
+        "Accept": "application/vnd.github.v3+json",
+        "Authorization": f"token {args.github_token}",
+    }
+    
+    include_stats = args.include_diff_stats.lower() == "true"
+    
+    # Collect all summaries
+    all_summaries = []
+    all_stats = []
+    brief_summary_parts = []
+    
+    for repo_config in repositories:
+        repo = repo_config.get("repo")
+        from_release = repo_config.get("from_release")
+        to_release = repo_config.get("to_release")
+        
+        if not all([repo, from_release, to_release]):
+            print(f"Skipping invalid repository config: {repo_config}")
+            continue
+        
+        print(f"\n{'='*60}")
+        print(f"Processing: {repo}")
+        print(f"From: {from_release} -> To: {to_release}")
+        print(f"{'='*60}")
+        
+        # Get the diff
+        diff_content, stats = get_compare_diff(
+            args.github_api_url, repo, from_release, to_release, authorization_header
+        )
+        
+        if not diff_content:
+            print(f"Could not get diff for {repo}, skipping...")
+            continue
+        
+        # Store stats
+        if stats:
+            stats["repo"] = repo
+            stats["from_release"] = from_release
+            stats["to_release"] = to_release
+            all_stats.append(stats)
+        
+        # Generate AI summary
+        summary = generate_ai_summary(
+            diff_content, repo, from_release, to_release,
+            args.openai_api_key, args.azure_openai_api_key,
+            args.azure_openai_endpoint, args.azure_openai_version,
+            args.openai_model, args.max_tokens, args.temperature,
+            args.custom_prompt
+        )
+        
+        if summary:
+            all_summaries.append({
+                "repo": repo,
+                "from_release": from_release,
+                "to_release": to_release,
+                "summary": summary,
+                "stats": stats
+            })
+            brief_summary_parts.append(f"- **{repo}**: {from_release} → {to_release}")
+    
+    if not all_summaries:
+        print("No summaries generated")
+        return 1
+    
+    # Build the combined release notes
+    combined_notes = f"# {args.release_title}\n\n"
+    combined_notes += f"*Generated on: {os.environ.get('GITHUB_RUN_ID', 'local')}*\n\n"
+    
+    # Add overview section
+    combined_notes += "## Overview\n\n"
+    combined_notes += "This release includes changes from the following repositories:\n\n"
+    for part in brief_summary_parts:
+        combined_notes += f"{part}\n"
+    combined_notes += "\n"
+    
+    # Add statistics if enabled
+    if include_stats and all_stats:
+        combined_notes += "## Statistics\n\n"
+        combined_notes += "| Repository | Commits | Files Changed | Additions | Deletions |\n"
+        combined_notes += "|------------|---------|---------------|-----------|----------|\n"
+        for stat in all_stats:
+            combined_notes += f"| {stat['repo']} | {stat['total_commits']} | {stat['files_changed']} | +{stat['additions']} | -{stat['deletions']} |\n"
+        combined_notes += "\n"
+    
+    # Add individual repository summaries
+    combined_notes += "---\n\n"
+    
+    for item in all_summaries:
+        combined_notes += f"## {item['repo']}\n\n"
+        combined_notes += f"**Release:** {item['from_release']} → {item['to_release']}\n\n"
+        combined_notes += item['summary']
+        combined_notes += "\n\n---\n\n"
+    
+    # Generate brief summary
+    brief_summary = f"Release notes generated for {len(all_summaries)} repositories. "
+    total_commits = sum(s.get("total_commits", 0) for s in all_stats)
+    total_files = sum(s.get("files_changed", 0) for s in all_stats)
+    brief_summary += f"Total: {total_commits} commits, {total_files} files changed."
+    
+    # Write outputs
+    write_github_output("release_notes", combined_notes)
+    write_github_output("summary", brief_summary)
+    
+    # Write to GitHub Actions summary
+    write_github_summary(combined_notes)
+    
+    print("\n" + "="*60)
+    print("Release notes generated successfully!")
+    print("="*60)
+    print(f"\nBrief summary: {brief_summary}")
+    
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

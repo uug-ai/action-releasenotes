@@ -1,0 +1,40 @@
+name: Generate Release Notes
+
+on:
+  workflow_dispatch:
+    inputs:
+      repositories:
+        description: 'JSON array of repository configurations'
+        required: true
+        default: '[{"repo": "owner/repo", "from_release": "v1.0.0", "to_release": "v1.1.0"}]'
+      release_title:
+        description: 'Title for the release notes'
+        required: false
+        default: 'Release Notes'
+
+jobs:
+  generate-release-notes:
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+
+    steps:
+      - name: Generate Release Notes
+        uses: uug-ai/action-releasenotes@main
+        id: release_notes
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          repositories: ${{ github.event.inputs.repositories }}
+          openai_api_key: ${{ secrets.OPENAI_API_KEY }}
+          # Or use Azure OpenAI:
+          # azure_openai_api_key: ${{ secrets.AZURE_OPENAI_API_KEY }}
+          # azure_openai_endpoint: ${{ secrets.AZURE_OPENAI_ENDPOINT }}
+          # azure_openai_version: "2024-02-15-preview"
+          release_title: ${{ github.event.inputs.release_title }}
+          openai_model: "gpt-4o"
+          temperature: "0.6"
+          include_diff_stats: "true"
+
+      - name: Print Summary
+        run: |
+          echo "Summary: ${{ steps.release_notes.outputs.summary }}"

@@ -1,0 +1,60 @@
+name: 'Generate Release Notes with AI'
+description: "Generate release notes by comparing releases across multiple repositories using (Azure) OpenAI"
+inputs:
+  github_token:
+    description: 'The GitHub token for accessing repositories'
+    required: true
+  repositories:
+    description: 'JSON array of repository configurations. Each item should have: repo (owner/repo), from_release, to_release. Example: [{"repo": "owner/repo1", "from_release": "v1.0.0", "to_release": "v1.1.0"}]'
+    required: true
+  openai_api_key:
+    description: 'OpenAI API key (leave empty if using Azure OpenAI)'
+    required: false
+    default: ''
+  azure_openai_api_key:
+    description: 'Azure OpenAI API key (leave empty if using OpenAI)'
+    required: false
+    default: ''
+  azure_openai_endpoint:
+    description: 'Azure OpenAI endpoint to use'
+    required: false
+    default: ''
+  azure_openai_version:
+    description: 'Azure OpenAI API version to use'
+    required: false
+    default: '2024-02-15-preview'
+  openai_model:
+    description: 'OpenAI model to use (needs to be compatible with the chat/completions endpoint)'
+    required: false
+    default: 'gpt-4o'
+  max_tokens:
+    description: 'Maximum number of tokens for the completion'
+    required: false
+    default: '2000'
+  temperature:
+    description: 'Temperature for the model (0-2), higher values make output more creative'
+    required: false
+    default: '0.6'
+  release_title:
+    description: 'Title for the combined release notes'
+    required: false
+    default: 'Release Notes'
+  include_diff_stats:
+    description: 'Include diff statistics (files changed, insertions, deletions) in output'
+    required: false
+    default: 'true'
+  custom_prompt:
+    description: 'Custom prompt to use for generating release notes (optional)'
+    required: false
+    default: ''
+outputs:
+  release_notes:
+    description: 'The generated release notes markdown'
+  summary:
+    description: 'A brief summary of all changes'
+runs:
+  using: 'docker'
+  image: 'Dockerfile'
+branding:
+  icon: 'file-text'
+  color: 'blue'
