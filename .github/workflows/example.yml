@@ -23,7 +23,9 @@ jobs:
         uses: uug-ai/action-releasenotes@main
         id: release_notes
         with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
+          # For private repos, use a PAT with 'repo' scope instead of GITHUB_TOKEN
+          # github_token: ${{ secrets.GITHUB_TOKEN }}
+          github_token: ${{ secrets.GH_PAT }}
           repositories: ${{ github.event.inputs.repositories }}
           # Use OpenAI:
           # openai_api_key: ${{ secrets.OPENAI_API_KEY }}

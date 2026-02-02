@@ -11,8 +11,7 @@ import openai
 from openai import AzureOpenAI
 
 SAMPLE_PROMPT = """
-Write release notes focusing on the key changes, new features, bug fixes, and improvements.
-Organize the notes into clear sections and make them user-friendly.
+Write a brief 3-5 line summary of the key changes in this release. Be concise and focus only on the most important changes.
 
 The release comparison is between "v1.0.0" and "v1.1.0" for repository "example/repo" and the following changes took place:
 
@@ -31,24 +30,16 @@ Changes in file src/config.py: @@ -5,3 +5,8 @@ DEFAULT_CONFIG = {
 """
 
 GOOD_SAMPLE_RESPONSE = """
-## What's New
-
-### New Features
-- **Logging System**: Added comprehensive logging support with configurable log levels and file output
-
-### Improvements  
+- Added comprehensive logging system with configurable log levels and file output
 - Enhanced application startup with proper initialization sequence
-- Added structured logging for better debugging and monitoring
-
-### Configuration Changes
-- New configuration options: `log_level` and `log_file` for customizing logging behavior
+- New configuration options: `log_level` and `log_file`
 """
 
 COMPLETION_PROMPT = """
-Write professional release notes for the changes between the two releases.
-Focus on what's new, what's improved, and what's fixed.
-Organize the notes into clear sections (New Features, Improvements, Bug Fixes, Breaking Changes if any).
-Make it user-friendly and easy to understand.
+Write a brief summary of the release changes in 3-5 bullet points maximum.
+Focus only on the most important changes: key new features, significant improvements, and critical bug fixes.
+Be concise - each bullet point should be one line.
+Do NOT include section headers, just bullet points.
 Go straight to the point. The following changes took place:
 """
 
@@ -139,7 +130,7 @@ def generate_ai_summary(diff_content: str, repo: str, from_release: str, to_rele
     messages = [
         {
             "role": "system",
-            "content": "You are a helpful assistant who writes professional release notes. Focus on clarity and user value."
+            "content": "You are a helpful assistant who writes brief, concise release summaries. Always respond with 3-5 bullet points maximum. No headers, no lengthy explanations - just the key changes."
         },
         {"role": "user", "content": SAMPLE_PROMPT},
         {"role": "assistant", "content": GOOD_SAMPLE_RESPONSE},
