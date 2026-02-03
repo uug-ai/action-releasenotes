@@ -102,24 +102,8 @@ def get_compare_diff(github_api_url: str, repo: str, from_release: str, to_relea
         '.py', '.js', '.ts', '.jsx', '.tsx', '.java', '.go', '.rs', '.rb', '.php',
         '.cs', '.cpp', '.c', '.h', '.hpp', '.swift', '.kt', '.scala', '.vue',
         '.sql', '.graphql', '.proto', '.json', '.xml', '.html', '.css', '.scss',
+        '.txt', '.md', '.rst',  # Documentation and text files
     ]
-    
-    def should_include_file(filename: str) -> bool:
-        """Check if file should be included in release notes."""
-        filename_lower = filename.lower()
-        
-        # Exclude files matching excluded patterns
-        for pattern in excluded_patterns:
-            if pattern.lower() in filename_lower:
-                return False
-        
-        # Include files with business code extensions
-        for ext in included_extensions:
-            if filename_lower.endswith(ext):
-                return True
-        
-        # Exclude other files by default
-        return False
     
     def is_icon_file(filename: str) -> bool:
         """Check if file is an icon or image asset."""
@@ -149,6 +133,27 @@ def get_compare_diff(github_api_url: str, repo: str, from_release: str, to_relea
             'helmfile.yaml', 'helmfile.yml',
         ]
         return any(pattern in filename_lower for pattern in helm_patterns)
+    
+    def should_include_file(filename: str) -> bool:
+        """Check if file should be included in release notes."""
+        filename_lower = filename.lower()
+        
+        # Exclude files matching excluded patterns
+        for pattern in excluded_patterns:
+            if pattern.lower() in filename_lower:
+                return False
+        
+        # Include files with business code extensions
+        for ext in included_extensions:
+            if filename_lower.endswith(ext):
+                return True
+        
+        # Also include icon files and helm chart files
+        if is_icon_file(filename) or is_helm_chart_file(filename):
+            return True
+        
+        # Exclude other files by default
+        return False
     
     files = compare_data.get("files", [])
     
