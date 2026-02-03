@@ -455,6 +455,7 @@ def main():
             brief_summary_parts.append(f"- **{repo}**: {from_release} → {to_release}")
     
     # Process raw diffs
+    raw_diff_file_stats = []  # Store per-file stats for raw diffs
     if raw_diffs:
         print(f"\n{'='*60}")
         print(f"Processing {len(raw_diffs)} raw diff(s)")
@@ -468,6 +469,22 @@ def main():
             
             if diff_content_raw:
                 raw_diff_content += f"Changes in file {diff_name}:\n{diff_content_raw}\n\n"
+                
+                # Calculate per-file statistics by counting diff lines
+                additions = 0
+                deletions = 0
+                for line in diff_content_raw.split('\n'):
+                    # Count lines starting with + or - (but not ++ or --)
+                    if line.startswith('+') and not line.startswith('++'):
+                        additions += 1
+                    elif line.startswith('-') and not line.startswith('--'):
+                        deletions += 1
+                
+                raw_diff_file_stats.append({
+                    "file_name": diff_name,
+                    "additions": additions,
+                    "deletions": deletions,
+                })
         
         # Generate AI summary for raw diffs
         if raw_diff_content.strip() != "\n### Raw Diffs\n":
@@ -480,15 +497,18 @@ def main():
             )
             
             if summary:
-                # Calculate basic stats for raw diffs
+                # Calculate total stats for raw diffs
+                total_additions = sum(f["additions"] for f in raw_diff_file_stats)
+                total_deletions = sum(f["deletions"] for f in raw_diff_file_stats)
                 raw_diff_stats = {
                     "repo": "Raw Diffs",
                     "from_release": "N/A",
                     "to_release": "N/A",
                     "total_commits": 0,
                     "files_changed": len(raw_diffs),
-                    "additions": sum(d.get("diff", "").count("+") for d in raw_diffs),
-                    "deletions": sum(d.get("diff", "").count("-") for d in raw_diffs),
+                    "additions": total_additions,
+                    "deletions": total_deletions,
+                    "file_stats": raw_diff_file_stats,  # Include per-file breakdown
                 }
                 all_stats.append(raw_diff_stats)
                 
@@ -523,7 +543,15 @@ def main():
         combined_notes += "| Repository | Commits | Files Changed | Additions | Deletions |\n"
         combined_notes += "|------------|---------|---------------|-----------|----------|\n"
         for stat in all_stats:
-            combined_notes += f"| {stat['repo']} | {stat['total_commits']} | {stat['files_changed']} | +{stat['additions']} | -{stat['deletions']} |\n"
+            # Check if this is a raw diff entry with per-file stats
+            if stat.get('repo') == 'Raw Diffs' and stat.get('file_stats'):
+                # First show the summary row for Raw Diffs
+                combined_notes += f"| **{stat['repo']}** | {stat['total_commits']} | {stat['files_changed']} | +{stat['additions']} | -{stat['deletions']} |\n"
+                # Then show per-file breakdown
+                for file_stat in stat['file_stats']:
+                    combined_notes += f"| ↳ {file_stat['file_name']} | - | 1 | +{file_stat['additions']} | -{file_stat['deletions']} |\n"
+            else:
+                combined_notes += f"| {stat['repo']} | {stat['total_commits']} | {stat['files_changed']} | +{stat['additions']} | -{stat['deletions']} |\n"
         combined_notes += "\n"
     
     # Add individual repository summaries
