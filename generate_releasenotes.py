@@ -512,15 +512,31 @@ def main():
                 }
                 all_stats.append(raw_diff_stats)
                 
+                # Calculate per-file change counts
+                raw_diff_files_with_counts = []
+                for d in raw_diffs:
+                    file_name = d.get("name", "unknown")
+                    diff_text = d.get("diff", "")
+                    additions = diff_text.count("\n+") + (1 if diff_text.startswith("+") else 0)
+                    deletions = diff_text.count("\n-") + (1 if diff_text.startswith("-") else 0)
+                    total_changes = additions + deletions
+                    raw_diff_files_with_counts.append({
+                        "name": file_name,
+                        "changes": total_changes
+                    })
+                
+                raw_diff_files = [d.get("name", "unknown") for d in raw_diffs]
                 all_summaries.append({
                     "repo": "Raw Diffs",
                     "from_release": "N/A",
                     "to_release": "N/A",
                     "summary": summary,
                     "stats": raw_diff_stats,
-                    "raw_diff_files": [d.get("name", "unknown") for d in raw_diffs]
+                    "raw_diff_files": raw_diff_files
                 })
-                brief_summary_parts.append(f"- **Raw Diffs**: {len(raw_diffs)} file(s)")
+                # Add each file as a separate bullet point with change count
+                for file_info in raw_diff_files_with_counts:
+                    brief_summary_parts.append(f"- **{file_info['name']}**: {file_info['changes']} change(s)")
     
     if not all_summaries:
         print("No summaries generated")
