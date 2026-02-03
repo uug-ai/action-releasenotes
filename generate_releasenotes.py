@@ -466,30 +466,38 @@ def main():
         print(f"Processing {len(raw_diffs)} raw diff(s)")
         print(f"{'='*60}")
         
+        # Debug: print all raw diff names
+        print(f"Raw diff files received:")
+        for idx, raw_diff in enumerate(raw_diffs):
+            diff_name = raw_diff.get("name", "unknown")
+            diff_content_raw = raw_diff.get("diff", "")
+            print(f"  [{idx}] {diff_name}: {len(diff_content_raw)} characters")
+        
         # Combine all raw diffs into a single diff content
         raw_diff_content = "\n### Raw Diffs\n\n"
         for raw_diff in raw_diffs:
             diff_name = raw_diff.get("name", "unknown")
             diff_content_raw = raw_diff.get("diff", "")
             
+            # Include ALL raw diffs, even if diff content is empty (file might be new/deleted)
+            raw_diff_content += f"Changes in file {diff_name}:\n{diff_content_raw if diff_content_raw else '(no diff content provided)'}\n\n"
+            
+            # Calculate per-file statistics by counting diff lines
+            additions = 0
+            deletions = 0
             if diff_content_raw:
-                raw_diff_content += f"Changes in file {diff_name}:\n{diff_content_raw}\n\n"
-                
-                # Calculate per-file statistics by counting diff lines
-                additions = 0
-                deletions = 0
                 for line in diff_content_raw.split('\n'):
                     # Count lines starting with + or - (but not ++ or --)
                     if line.startswith('+') and not line.startswith('++'):
                         additions += 1
                     elif line.startswith('-') and not line.startswith('--'):
                         deletions += 1
-                
-                raw_diff_file_stats.append({
-                    "file_name": diff_name,
-                    "additions": additions,
-                    "deletions": deletions,
-                })
+            
+            raw_diff_file_stats.append({
+                "file_name": diff_name,
+                "additions": additions,
+                "deletions": deletions,
+            })
         
         # Generate AI summary for raw diffs
         if raw_diff_content.strip() != "\n### Raw Diffs\n":
