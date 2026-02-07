@@ -37,22 +37,16 @@ GOOD_SAMPLE_RESPONSE = """
 """
 
 TEST_PLAN_PROMPT = """
-You are a QA engineer creating a test plan for a front-end application. 
-Based on the application context provided and the code changes (diff), create a concrete test plan.
+You are a QA engineer creating a brief test plan for a front-end application.
+Based on the application context and code changes (diff), list only the key test scenarios.
 
-Focus on:
-1. **Affected Features**: Identify which pages/features are affected by the changes
-2. **Test Scenarios**: Specific test cases that need to be executed
-3. **Regression Tests**: Areas that might be indirectly affected and need regression testing
-4. **Edge Cases**: Potential edge cases to test based on the changes
-
-Format the test plan as:
-- Use clear sections with headers
-- Use checkboxes (- [ ]) for each test case
-- Include expected behavior for each test
-- Prioritize tests (Critical, High, Medium, Low)
-
-Be specific and actionable. Each test case should be clear enough for a QA engineer to execute.
+Rules:
+- Keep it SHORT and CONCISE
+- NO title, NO headers - start directly with the bullet list
+- Only include test scenarios directly related to the changes
+- Use a simple bullet list with checkboxes
+- Each test case: one line with action → expected result
+- Maximum 10 test cases total
 """
 
 TEST_PLAN_SAMPLE_PROMPT = """
@@ -62,12 +56,10 @@ Create a test plan based on the following:
 The application is a simple dashboard with:
 - Login page: Users can log in with email/password
 - Dashboard page: Shows user statistics and recent activity
-- Settings page: Users can update their profile and preferences
 
 ## Code Changes:
 Changes in file src/components/Login.tsx: @@ -15,6 +15,10 @@ 
      const handleLogin = async () => {
-+      // Added password validation
 +      if (password.length < 8) {
 +        setError("Password must be at least 8 characters");
 +        return;
@@ -76,30 +68,10 @@ Changes in file src/components/Login.tsx: @@ -15,6 +15,10 @@
 """
 
 TEST_PLAN_SAMPLE_RESPONSE = """
-# Test Plan
-
-## Affected Features
-- **Login Page**: Password validation logic added
-
-## Test Scenarios
-
-### Critical Priority
-- [ ] **Login with valid credentials**: Enter valid email and password (8+ characters) → Should successfully log in
-- [ ] **Login with short password**: Enter password with less than 8 characters → Should show error "Password must be at least 8 characters"
-
-### High Priority  
-- [ ] **Login with exactly 8 characters**: Enter password with exactly 8 characters → Should proceed with login attempt
-- [ ] **Error message display**: Verify error message is clearly visible and styled correctly
-- [ ] **Error message clearance**: After showing error, enter valid password → Error should clear
-
-### Medium Priority
-- [ ] **Empty password field**: Submit with empty password → Should show validation error
-- [ ] **Password field interaction**: Verify password field still accepts input after error
-
-### Regression Tests
-- [ ] **Dashboard access**: After successful login, verify dashboard loads correctly
-- [ ] **Session persistence**: After login, refresh page → Should remain logged in
-- [ ] **Logout functionality**: After login, logout → Should return to login page
+- [ ] Login with password < 8 chars → Should show error "Password must be at least 8 characters"
+- [ ] Login with password = 8 chars → Should proceed with login
+- [ ] Login with valid credentials → Should redirect to dashboard
+- [ ] Error clears when typing valid password → Error message should disappear
 """
 
 COMPLETION_PROMPT = """
@@ -458,7 +430,7 @@ def generate_test_plan(diff_content: str, frontend_context: str,
     messages = [
         {
             "role": "system",
-            "content": "You are an expert QA engineer who creates comprehensive, actionable test plans. Focus on creating specific test cases that are easy to execute and verify."
+            "content": "You are a QA engineer. Create a brief test plan with only the essential test scenarios. No title, no headers - start directly with the bullet list. Keep it short - max 10 bullet points total."
         },
         {"role": "user", "content": TEST_PLAN_SAMPLE_PROMPT},
         {"role": "assistant", "content": TEST_PLAN_SAMPLE_RESPONSE},
