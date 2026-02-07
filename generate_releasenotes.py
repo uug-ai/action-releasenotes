@@ -102,24 +102,8 @@ def get_compare_diff(github_api_url: str, repo: str, from_release: str, to_relea
         '.py', '.js', '.ts', '.jsx', '.tsx', '.java', '.go', '.rs', '.rb', '.php',
         '.cs', '.cpp', '.c', '.h', '.hpp', '.swift', '.kt', '.scala', '.vue',
         '.sql', '.graphql', '.proto', '.json', '.xml', '.html', '.css', '.scss',
+        '.txt', '.md', '.rst',  # Documentation and text files
     ]
-    
-    def should_include_file(filename: str) -> bool:
-        """Check if file should be included in release notes."""
-        filename_lower = filename.lower()
-        
-        # Exclude files matching excluded patterns
-        for pattern in excluded_patterns:
-            if pattern.lower() in filename_lower:
-                return False
-        
-        # Include files with business code extensions
-        for ext in included_extensions:
-            if filename_lower.endswith(ext):
-                return True
-        
-        # Exclude other files by default
-        return False
     
     def is_icon_file(filename: str) -> bool:
         """Check if file is an icon or image asset."""
@@ -150,18 +134,71 @@ def get_compare_diff(github_api_url: str, repo: str, from_release: str, to_relea
         ]
         return any(pattern in filename_lower for pattern in helm_patterns)
     
+    def should_include_file(filename: str) -> bool:
+        """Check if file should be included in release notes."""
+        filename_lower = filename.lower()
+        
+        # Exclude files matching excluded patterns
+        for pattern in excluded_patterns:
+            if pattern.lower() in filename_lower:
+                return False
+        
+        # Include files with business code extensions
+        for ext in included_extensions:
+            if filename_lower.endswith(ext):
+                return True
+        
+        # Also include icon files and helm chart files
+        if is_icon_file(filename) or is_helm_chart_file(filename):
+            return True
+        
+        # Exclude other files by default
+        return False
+    
     files = compare_data.get("files", [])
     
+    def extract_new_icons_from_diff(patch: str) -> list:
+        """Extract only newly added icon names from icons.js diff."""
+        new_icons = []
+        for line in patch.split('\n'):
+            # Only look at added lines (starting with +, but not ++)
+            if line.startswith('+') and not line.startswith('++'):
+                # Common patterns for icon definitions:
+                # export const iconName = ...
+                # iconName: ...
+                # "iconName": ...
+                # 'iconName': ...
+                import re
+                # Match export const/let/var iconName
+                match = re.search(r'export\s+(?:const|let|var)\s+(\w+)', line)
+                if match:
+                    new_icons.append(match.group(1))
+                    continue
+                # Match object key patterns: iconName: or "iconName": or 'iconName':
+                match = re.search(r'["\']?(\w+(?:-\w+)*)["\']?\s*:\s*[\'"`<{]', line)
+                if match:
+                    icon_name = match.group(1)
+                    # Filter out common non-icon keys
+                    if icon_name not in ['viewBox', 'fill', 'stroke', 'width', 'height', 'd', 'path', 'xmlns', 'class', 'style']:
+                        new_icons.append(icon_name)
+        return new_icons
+
     # Track special file changes for user awareness
     icon_changes = []
+    new_icons_added = []  # Track newly added icon names
     helm_chart_changes = []
     
     for file_info in files:
         filename = file_info.get("filename", "unknown")
+        patch = file_info.get("patch", "")
         
-        # Track icon changes
+        # Track icon changes and extract new icons
         if is_icon_file(filename):
             icon_changes.append(filename)
+            # For icons.js/ts files, extract newly added icon names
+            if filename.lower().endswith(('.js', '.ts', '.jsx', '.tsx')):
+                new_icons = extract_new_icons_from_diff(patch)
+                new_icons_added.extend(new_icons)
         
         # Track helm chart changes
         if is_helm_chart_file(filename):
@@ -171,7 +208,6 @@ def get_compare_diff(github_api_url: str, repo: str, from_release: str, to_relea
         if not should_include_file(filename):
             continue
         
-        patch = file_info.get("patch", "")
         status = file_info.get("status", "modified")
         additions = file_info.get("additions", 0)
         deletions = file_info.get("deletions", 0)
@@ -179,7 +215,14 @@ def get_compare_diff(github_api_url: str, repo: str, from_release: str, to_relea
         total_additions += additions
         total_deletions += deletions
         
-        if patch:
+        # For icon files, only show summary of new icons instead of full diff
+        if is_icon_file(filename) and filename.lower().endswith(('.js', '.ts', '.jsx', '.tsx')):
+            new_icons = extract_new_icons_from_diff(patch)
+            if new_icons:
+                diff_content += f"Changes in file {filename} ({status}, +{additions}/-{deletions}): New icons added: {', '.join(new_icons)}\n"
+            else:
+                diff_content += f"Changes in file {filename} ({status}, +{additions}/-{deletions}): Icon content updated (no new icons added)\n"
+        elif patch:
             diff_content += f"Changes in file {filename} ({status}, +{additions}/-{deletions}): {patch}\n"
     
     # Add notes about special file changes that require user attention
@@ -189,6 +232,8 @@ def get_compare_diff(github_api_url: str, repo: str, from_release: str, to_relea
             diff_content += f"\n**Icon/Image changes detected** (may require asset updates):\n"
             for icon_file in icon_changes:
                 diff_content += f"- {icon_file}\n"
+            if new_icons_added:
+                diff_content += f"\n**New icons added:** {', '.join(set(new_icons_added))}\n"
         if helm_chart_changes:
             diff_content += f"\n**Helm chart changes detected** (may require chart version updates):\n"
             for helm_file in helm_chart_changes:
@@ -453,10 +498,40 @@ def main():
             brief_summary_parts.append(f"- **{repo}**: {from_release} → {to_release}")
     
     # Process raw diffs
+    raw_diff_file_stats = []  # Store per-file stats for raw diffs
     if raw_diffs:
         print(f"\n{'='*60}")
         print(f"Processing {len(raw_diffs)} raw diff(s)")
         print(f"{'='*60}")
+        
+        # Debug: print all raw diff names
+        print(f"Raw diff files received:")
+        for idx, raw_diff in enumerate(raw_diffs):
+            diff_name = raw_diff.get("name", "unknown")
+            diff_content_raw = raw_diff.get("diff", "")
+            print(f"  [{idx}] {diff_name}: {len(diff_content_raw)} characters")
+        
+        # Helper function to extract new icons from diff (same logic as repository processing)
+        def extract_new_icons_from_raw_diff(patch: str) -> list:
+            """Extract only newly added icon names from icons.js diff."""
+            import re
+            new_icons = []
+            for line in patch.split('\n'):
+                # Only look at added lines (starting with +, but not ++)
+                if line.startswith('+') and not line.startswith('++'):
+                    # Match export const/let/var iconName
+                    match = re.search(r'export\s+(?:const|let|var)\s+(\w+)', line)
+                    if match:
+                        new_icons.append(match.group(1))
+                        continue
+                    # Match object key patterns: iconName: or "iconName": or 'iconName':
+                    match = re.search(r'["\']?(\w+(?:-\w+)*)["\']?\s*:\s*[\'"`<{]', line)
+                    if match:
+                        icon_name = match.group(1)
+                        # Filter out common non-icon keys
+                        if icon_name not in ['viewBox', 'fill', 'stroke', 'width', 'height', 'd', 'path', 'xmlns', 'class', 'style']:
+                            new_icons.append(icon_name)
+            return new_icons
         
         # Combine all raw diffs into a single diff content
         raw_diff_content = "\n### Raw Diffs\n\n"
@@ -464,8 +539,36 @@ def main():
             diff_name = raw_diff.get("name", "unknown")
             diff_content_raw = raw_diff.get("diff", "")
             
+            # Check if this is an icons.js file
+            is_icons_file = diff_name.lower().endswith(('icons.js', 'icons.ts', 'icons.jsx', 'icons.tsx'))
+            
+            if is_icons_file and diff_content_raw:
+                # For icon files, only report newly added icons
+                new_icons = extract_new_icons_from_raw_diff(diff_content_raw)
+                if new_icons:
+                    raw_diff_content += f"Changes in file {diff_name}: New icons added: {', '.join(new_icons)}\n\n"
+                else:
+                    raw_diff_content += f"Changes in file {diff_name}: Icon content updated (no new icons added)\n\n"
+            else:
+                # Include full diff for all other files (including indexes.txt)
+                raw_diff_content += f"Changes in file {diff_name}:\n{diff_content_raw if diff_content_raw else '(no diff content provided)'}\n\n"
+            
+            # Calculate per-file statistics by counting diff lines
+            additions = 0
+            deletions = 0
             if diff_content_raw:
-                raw_diff_content += f"Changes in file {diff_name}:\n{diff_content_raw}\n\n"
+                for line in diff_content_raw.split('\n'):
+                    # Count lines starting with + or - (but not ++ or --)
+                    if line.startswith('+') and not line.startswith('++'):
+                        additions += 1
+                    elif line.startswith('-') and not line.startswith('--'):
+                        deletions += 1
+            
+            raw_diff_file_stats.append({
+                "file_name": diff_name,
+                "additions": additions,
+                "deletions": deletions,
+            })
         
         # Generate AI summary for raw diffs
         if raw_diff_content.strip() != "\n### Raw Diffs\n":
@@ -478,15 +581,18 @@ def main():
             )
             
             if summary:
-                # Calculate basic stats for raw diffs
+                # Calculate total stats for raw diffs
+                total_additions = sum(f["additions"] for f in raw_diff_file_stats)
+                total_deletions = sum(f["deletions"] for f in raw_diff_file_stats)
                 raw_diff_stats = {
                     "repo": "Raw Diffs",
                     "from_release": "N/A",
                     "to_release": "N/A",
                     "total_commits": 0,
                     "files_changed": len(raw_diffs),
-                    "additions": sum(d.get("diff", "").count("+") for d in raw_diffs),
-                    "deletions": sum(d.get("diff", "").count("-") for d in raw_diffs),
+                    "additions": total_additions,
+                    "deletions": total_deletions,
+                    "file_stats": raw_diff_file_stats,  # Include per-file breakdown
                 }
                 all_stats.append(raw_diff_stats)
                 
@@ -537,7 +643,15 @@ def main():
         combined_notes += "| Repository | Commits | Files Changed | Additions | Deletions |\n"
         combined_notes += "|------------|---------|---------------|-----------|----------|\n"
         for stat in all_stats:
-            combined_notes += f"| {stat['repo']} | {stat['total_commits']} | {stat['files_changed']} | +{stat['additions']} | -{stat['deletions']} |\n"
+            # Check if this is a raw diff entry with per-file stats
+            if stat.get('repo') == 'Raw Diffs' and stat.get('file_stats'):
+                # First show the summary row for Raw Diffs
+                combined_notes += f"| **{stat['repo']}** | {stat['total_commits']} | {stat['files_changed']} | +{stat['additions']} | -{stat['deletions']} |\n"
+                # Then show per-file breakdown
+                for file_stat in stat['file_stats']:
+                    combined_notes += f"| ↳ {file_stat['file_name']} | - | 1 | +{file_stat['additions']} | -{file_stat['deletions']} |\n"
+            else:
+                combined_notes += f"| {stat['repo']} | {stat['total_commits']} | {stat['files_changed']} | +{stat['additions']} | -{stat['deletions']} |\n"
         combined_notes += "\n"
     
     # Add individual repository summaries
