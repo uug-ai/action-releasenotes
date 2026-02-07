@@ -42,4 +42,6 @@ fi
   --temperature "${INPUT_TEMPERATURE:-0.6}" \
   --release-title "${INPUT_RELEASE_TITLE:-Release Notes}" \
   --include-diff-stats "${INPUT_INCLUDE_DIFF_STATS:-true}" \
-  --custom-prompt "${INPUT_CUSTOM_PROMPT:-}"
+  --custom-prompt "${INPUT_CUSTOM_PROMPT:-}" \
+  --frontend-context-file "${INPUT_FRONTEND_CONTEXT_FILE:-}" \
+  --generate-test-plan "${INPUT_GENERATE_TEST_PLAN:-false}"

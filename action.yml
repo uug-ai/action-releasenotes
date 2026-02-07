@@ -52,11 +52,21 @@ inputs:
     description: 'Custom prompt to use for generating release notes (optional)'
     required: false
     default: ''
+  frontend_context_file:
+    description: 'Path to a .txt file containing a description of the frontend application (pages, features, functionality). Used to generate a targeted test plan based on the changes.'
+    required: false
+    default: ''
+  generate_test_plan:
+    description: 'Generate a test plan based on the changes and frontend context'
+    required: false
+    default: 'false'
 outputs:
   release_notes:
     description: 'The generated release notes markdown'
   summary:
     description: 'A brief summary of all changes'
+  test_plan:
+    description: 'The generated test plan markdown (if frontend_context_file is provided and generate_test_plan is true)'
 runs:
   using: 'docker'
   image: 'Dockerfile'

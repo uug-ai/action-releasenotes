@@ -36,6 +36,72 @@ GOOD_SAMPLE_RESPONSE = """
 - New configuration options: `log_level` and `log_file`
 """
 
+TEST_PLAN_PROMPT = """
+You are a QA engineer creating a test plan for a front-end application. 
+Based on the application context provided and the code changes (diff), create a concrete test plan.
+
+Focus on:
+1. **Affected Features**: Identify which pages/features are affected by the changes
+2. **Test Scenarios**: Specific test cases that need to be executed
+3. **Regression Tests**: Areas that might be indirectly affected and need regression testing
+4. **Edge Cases**: Potential edge cases to test based on the changes
+
+Format the test plan as:
+- Use clear sections with headers
+- Use checkboxes (- [ ]) for each test case
+- Include expected behavior for each test
+- Prioritize tests (Critical, High, Medium, Low)
+
+Be specific and actionable. Each test case should be clear enough for a QA engineer to execute.
+"""
+
+TEST_PLAN_SAMPLE_PROMPT = """
+Create a test plan based on the following:
+
+## Application Context:
+The application is a simple dashboard with:
+- Login page: Users can log in with email/password
+- Dashboard page: Shows user statistics and recent activity
+- Settings page: Users can update their profile and preferences
+
+## Code Changes:
+Changes in file src/components/Login.tsx: @@ -15,6 +15,10 @@ 
+     const handleLogin = async () => {
++      // Added password validation
++      if (password.length < 8) {
++        setError("Password must be at least 8 characters");
++        return;
++      }
+       await loginUser(email, password);
+"""
+
+TEST_PLAN_SAMPLE_RESPONSE = """
+# Test Plan
+
+## Affected Features
+- **Login Page**: Password validation logic added
+
+## Test Scenarios
+
+### Critical Priority
+- [ ] **Login with valid credentials**: Enter valid email and password (8+ characters) → Should successfully log in
+- [ ] **Login with short password**: Enter password with less than 8 characters → Should show error "Password must be at least 8 characters"
+
+### High Priority  
+- [ ] **Login with exactly 8 characters**: Enter password with exactly 8 characters → Should proceed with login attempt
+- [ ] **Error message display**: Verify error message is clearly visible and styled correctly
+- [ ] **Error message clearance**: After showing error, enter valid password → Error should clear
+
+### Medium Priority
+- [ ] **Empty password field**: Submit with empty password → Should show validation error
+- [ ] **Password field interaction**: Verify password field still accepts input after error
+
+### Regression Tests
+- [ ] **Dashboard access**: After successful login, verify dashboard loads correctly
+- [ ] **Session persistence**: After login, refresh page → Should remain logged in
+- [ ] **Logout functionality**: After login, logout → Should return to login page
+"""
+
 COMPLETION_PROMPT = """
 Write a brief summary of the release changes.
 Focus on the most important changes: key new features, significant improvements, and critical bug fixes.
@@ -334,6 +400,110 @@ def generate_ai_summary(diff_content: str, repo: str, from_release: str, to_rele
     return generated_summary
 
 
+def read_frontend_context(file_path: str) -> str:
+    """
+    Read the frontend context from a file.
+    """
+    if not file_path or not file_path.strip():
+        return ""
+    
+    file_path = file_path.strip()
+    
+    if not os.path.exists(file_path):
+        print(f"Warning: Frontend context file not found: {file_path}")
+        return ""
+    
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            content = f.read()
+        print(f"Read frontend context from {file_path} ({len(content)} characters)")
+        return content
+    except Exception as e:
+        print(f"Error reading frontend context file: {e}")
+        return ""
+
+
+def generate_test_plan(diff_content: str, frontend_context: str,
+                       openai_api_key: str, azure_openai_api_key: str,
+                       azure_openai_endpoint: str, azure_openai_version: str,
+                       model: str, max_tokens: int, temperature: float) -> str:
+    """
+    Generate a test plan based on the diff content and frontend application context.
+    """
+    if not frontend_context:
+        print("No frontend context provided, skipping test plan generation")
+        return ""
+    
+    prompt = TEST_PLAN_PROMPT + "\n\n"
+    prompt += "## Application Context:\n"
+    prompt += frontend_context + "\n\n"
+    prompt += "## Code Changes:\n"
+    prompt += diff_content
+    
+    # Truncate if too long (approximate token limit)
+    max_allowed_tokens = 12000
+    characters_per_token = 4
+    max_allowed_characters = max_allowed_tokens * characters_per_token
+    if len(prompt) > max_allowed_characters:
+        # Prioritize keeping the frontend context, truncate the diff
+        context_portion = frontend_context[:max_allowed_characters // 2]
+        diff_portion = diff_content[:max_allowed_characters // 2]
+        prompt = TEST_PLAN_PROMPT + "\n\n"
+        prompt += "## Application Context:\n"
+        prompt += context_portion + "\n\n"
+        prompt += "## Code Changes:\n"
+        prompt += diff_portion
+        print(f"Warning: Test plan prompt truncated to {max_allowed_characters} characters")
+    
+    messages = [
+        {
+            "role": "system",
+            "content": "You are an expert QA engineer who creates comprehensive, actionable test plans. Focus on creating specific test cases that are easy to execute and verify."
+        },
+        {"role": "user", "content": TEST_PLAN_SAMPLE_PROMPT},
+        {"role": "assistant", "content": TEST_PLAN_SAMPLE_RESPONSE},
+        {"role": "user", "content": prompt},
+    ]
+    
+    generated_test_plan = ""
+    
+    # Check for non-empty API keys
+    has_openai_key = openai_api_key and openai_api_key.strip()
+    has_azure_key = azure_openai_api_key and azure_openai_api_key.strip()
+    
+    if has_openai_key:
+        print("Generating test plan using OpenAI API...")
+        client = openai.OpenAI(api_key=openai_api_key.strip())
+        response = client.chat.completions.create(
+            model=model,
+            messages=messages,
+            max_completion_tokens=max_tokens,
+        )
+        generated_test_plan = response.choices[0].message.content
+        
+    elif has_azure_key:
+        print("Generating test plan using Azure OpenAI API...")
+        if not azure_openai_endpoint or not azure_openai_endpoint.strip():
+            print("Error: Azure OpenAI endpoint is required for test plan generation")
+            return ""
+        client = AzureOpenAI(
+            api_key=azure_openai_api_key.strip(),
+            azure_endpoint=azure_openai_endpoint.strip(),
+            api_version=azure_openai_version.strip() if azure_openai_version else "2024-02-15-preview"
+        )
+        response = client.chat.completions.create(
+            model=model,
+            messages=messages,
+            max_completion_tokens=max_tokens,
+        )
+        generated_test_plan = response.choices[0].message.content
+    else:
+        print("Error: No API key provided for test plan generation")
+        return ""
+    
+    return generated_test_plan
+
+
 def write_github_output(name: str, value: str):
     """Write output to GitHub Actions output file."""
     github_output = os.environ.get("GITHUB_OUTPUT")
@@ -414,6 +584,14 @@ def main():
     parser.add_argument(
         "--custom-prompt", type=str, required=False, default="",
         help="Custom prompt for generating release notes"
+    )
+    parser.add_argument(
+        "--frontend-context-file", type=str, required=False, default="",
+        help="Path to a .txt file containing frontend application context for test plan generation"
+    )
+    parser.add_argument(
+        "--generate-test-plan", type=str, required=False, default="false",
+        help="Generate a test plan based on changes and frontend context"
     )
     
     args = parser.parse_args()
@@ -669,9 +847,71 @@ def main():
     total_files = sum(s.get("files_changed", 0) for s in all_stats)
     brief_summary += f"Total: {total_commits} commits, {total_files} files changed."
     
+    # Generate test plan if enabled
+    test_plan = ""
+    should_generate_test_plan = args.generate_test_plan.lower() == "true"
+    frontend_context_file = args.frontend_context_file
+    
+    if should_generate_test_plan and frontend_context_file:
+        print("\n" + "="*60)
+        print("Generating Test Plan...")
+        print("="*60)
+        
+        # Read frontend context
+        frontend_context = read_frontend_context(frontend_context_file)
+        
+        if frontend_context:
+            # Collect all diff content for test plan generation
+            all_diff_content = ""
+            
+            # Collect diffs from repositories
+            for repo_config in repositories:
+                repo = repo_config.get("repo")
+                from_release = repo_config.get("from_release")
+                to_release = repo_config.get("to_release")
+                
+                if all([repo, from_release, to_release]):
+                    diff_content, _ = get_compare_diff(
+                        args.github_api_url, repo, from_release, to_release, authorization_header
+                    )
+                    if diff_content:
+                        all_diff_content += diff_content + "\n"
+            
+            # Collect raw diffs
+            if raw_diffs:
+                all_diff_content += "\n### Raw Diffs\n\n"
+                for raw_diff in raw_diffs:
+                    diff_name = raw_diff.get("name", "unknown")
+                    diff_content_raw = raw_diff.get("diff", "")
+                    all_diff_content += f"Changes in file {diff_name}:\n{diff_content_raw}\n\n"
+            
+            # Generate the test plan
+            test_plan = generate_test_plan(
+                all_diff_content, frontend_context,
+                args.openai_api_key, args.azure_openai_api_key,
+                args.azure_openai_endpoint, args.azure_openai_version,
+                args.openai_model, args.max_tokens, args.temperature
+            )
+            
+            if test_plan:
+                # Add test plan section to the combined notes
+                combined_notes += "\n# Test Plan\n\n"
+                combined_notes += f"*Based on frontend context from: {frontend_context_file}*\n\n"
+                combined_notes += test_plan
+                combined_notes += "\n"
+                
+                print("Test plan generated successfully!")
+            else:
+                print("Warning: Failed to generate test plan")
+        else:
+            print(f"Warning: Could not read frontend context from {frontend_context_file}")
+    elif should_generate_test_plan and not frontend_context_file:
+        print("Warning: Test plan generation enabled but no frontend context file provided")
+    
     # Write outputs
     write_github_output("release_notes", combined_notes)
     write_github_output("summary", brief_summary)
+    write_github_output("test_plan", test_plan)
     
     # Write to GitHub Actions summary
     write_github_summary(combined_notes)

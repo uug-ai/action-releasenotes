@@ -142,6 +142,8 @@ jobs:
 | `release_title` | Title for the combined release notes | No | `Release Notes` |
 | `include_diff_stats` | Include diff statistics in output | No | `true` |
 | `custom_prompt` | Custom prompt for generating release notes | No | `''` |
+| `frontend_context_file` | Path to a .txt file with frontend app description for test plan generation | No | `''` |
+| `generate_test_plan` | Generate a test plan based on changes and frontend context | No | `false` |
 
 **Note:** At least one of `repositories` or `raw_diffs` must be provided.
 
@@ -220,12 +222,87 @@ You can also use the action with only raw diffs (no repository comparisons):
     openai_api_key: ${{ secrets.OPENAI_API_KEY }}
 ```
 
+### Example with Test Plan Generation
+
+Generate a test plan based on your frontend application context and code changes:
+
+1. First, create a frontend context file (e.g., `frontend-context.txt`) that describes your application:
+
+```txt
+# My Application - Frontend Context
+
+## Pages
+
+### Login Page (/login)
+- Email/password authentication
+- "Forgot password" link
+- "Remember me" checkbox
+- OAuth login buttons (Google, GitHub)
+
+### Dashboard (/dashboard)
+- Overview statistics cards
+- Recent activity feed
+- Quick action buttons
+- Charts showing usage trends
+
+### Settings Page (/settings)
+- Profile settings (name, email, avatar)
+- Notification preferences
+- Security settings (password change, 2FA)
+- Theme preferences (light/dark mode)
+
+### User Management (/admin/users)
+- User list with search and filters
+- Add/edit/delete users
+- Role assignment
+- Bulk actions
+
+## Components
+
+### Navigation
+- Top navbar with user menu
+- Sidebar with main navigation links
+- Breadcrumbs
+
+### Forms
+- Form validation on all inputs
+- Loading states during submission
+- Error message display
+```
+
+2. Use the action with test plan generation enabled:
+
+```yaml
+- name: Checkout repository
+  uses: actions/checkout@v4
+
+- uses: uug-ai/action-releasenotes@main
+  id: release_notes
+  with:
+    github_token: ${{ secrets.GITHUB_TOKEN }}
+    repositories: |
+      [
+        {"repo": "myorg/frontend", "from_release": "v2.0.0", "to_release": "v2.1.0"}
+      ]
+    openai_api_key: ${{ secrets.OPENAI_API_KEY }}
+    frontend_context_file: "./frontend-context.txt"
+    generate_test_plan: "true"
+    release_title: "Frontend Release v2.1.0"
+```
+
+The generated test plan will include:
+- **Affected Features**: Which pages/components are affected by the changes
+- **Test Scenarios**: Specific test cases with expected behavior
+- **Regression Tests**: Areas that might be indirectly affected
+- **Priority Levels**: Critical, High, Medium, Low prioritization
+
 ## Outputs
 
 | Output | Description |
 |--------|-------------|
 | `release_notes` | The generated release notes in Markdown format |
 | `summary` | A brief summary of all changes |
+| `test_plan` | The generated test plan (if `frontend_context_file` is provided and `generate_test_plan` is `true`) |
 
 ### Using Outputs
 
