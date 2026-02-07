@@ -261,8 +261,7 @@ def generate_ai_summary(diff_content: str, repo: str, from_release: str, to_rele
         response = client.chat.completions.create(
             model=model,
             messages=messages,
-            temperature=temperature,
-            max_tokens=max_tokens,
+            max_completion_tokens=max_tokens,
         )
         generated_summary = response.choices[0].message.content
         
@@ -279,8 +278,7 @@ def generate_ai_summary(diff_content: str, repo: str, from_release: str, to_rele
         response = client.chat.completions.create(
             model=model,
             messages=messages,
-            temperature=temperature,
-            max_tokens=max_tokens,
+            max_completion_tokens=max_tokens,
         )
         generated_summary = response.choices[0].message.content
     else:
