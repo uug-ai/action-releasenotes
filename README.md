@@ -144,6 +144,8 @@ jobs:
 | `custom_prompt` | Custom prompt for generating release notes | No | `''` |
 | `frontend_context_file` | Path to a .txt file with frontend app description for test plan generation | No | `''` |
 | `generate_test_plan` | Generate a test plan based on changes and frontend context | No | `false` |
+| `context_source` | Build each repository summary from the `diff` or from the merged `pull_requests` (see below) | No | `diff` |
+| `exclude_labels` | Comma-separated pull request labels to leave out (`pull_requests` only) | No | `dependencies,ci,chore,skip-changelog,skip-release-notes,no-release-notes` |
 
 **Note:** At least one of `repositories` or `raw_diffs` must be provided.
 
@@ -176,6 +178,31 @@ Each item in the `raw_diffs` array should have:
 
 - `name`: A filename or identifier for the diff
 - `diff`: The raw diff content (unified diff format recommended)
+
+### Pull Request Context
+
+By default each repository is summarized from its raw file patches, followed by the commit subjects. The prompt is cut at about 32,000 characters, so for a large release the model sees only the first files and none of the commit subjects.
+
+With `context_source: pull_requests` the summary is built from the pull requests merged between the two releases instead:
+
+1. The commits in the range are mapped to the pull requests whose merge commit is in the range (merge, squash and rebase merges all work). This takes one GraphQL query per 50 commits.
+2. Titles, descriptions, labels, changed paths and commit headlines are fetched in one GraphQL query per 20 pull requests.
+3. Pull requests from bots, with an `exclude_labels` label, or with a housekeeping title (`chore:`, `ci:`, `docs:`, `Bump …`, `Release v…`) are left out. Commits pushed without a pull request are listed by subject.
+4. Descriptions lose preview links, images, and implementation, test and checklist sections. They then share a fixed character budget, so every pull request is included and only long descriptions are shortened. When a description is nearly empty, the pull request's commit headlines are used.
+5. The model ends every bullet with the pull requests it is based on. Those citations become links, and a bullet that cites only pull requests outside the range is dropped.
+
+If the pull requests cannot be resolved for a repository, that repository falls back to the diff.
+
+```yaml
+- name: Generate Release Notes
+  uses: uug-ai/action-releasenotes@main
+  with:
+    github_token: ${{ secrets.TOKEN }}
+    repositories: '[{"repo": "myorg/frontend", "from_release": "v1.18.0", "to_release": "v1.19.0"}]'
+    context_source: pull_requests
+    azure_openai_api_key: ${{ secrets.AZURE_OPENAI_API_KEY }}
+    azure_openai_endpoint: ${{ secrets.AZURE_OPENAI_ENDPOINT }}
+```
 
 ### Example with Raw Diffs
 

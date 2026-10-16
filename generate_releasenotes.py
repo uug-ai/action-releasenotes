@@ -7,6 +7,7 @@ import requests
 import argparse
 import json
 import os
+import re
 from datetime import datetime
 import openai
 from openai import AzureOpenAI
@@ -80,6 +81,43 @@ Focus on the most important changes: key new features, significant improvements,
 Be concise - each bullet point should be one line and cover a distinct change without overlapping with others.
 Be complete but not extensive. Do NOT include section headers, just bullet points.
 Go straight to the point. The following changes took place:
+"""
+
+PR_SAMPLE_PROMPT = """
+Write a brief summary of the key changes in this release. Be concise, complete, and avoid redundancy. Each bullet point should cover a distinct change.
+
+Repository: example/repo
+Comparing: v1.0.0 → v1.1.0
+
+### PR #41: Add configurable log levels
+Labels: enhancement
+Areas: src/logging (3), src/config (1)
+Description:
+- Adds `log_level` and `log_file` settings so operators can tune verbosity and write logs to disk.
+- Defaults to INFO; existing deployments keep their current output.
+
+### PR #43: Retry uploads after transient storage errors
+Areas: src/upload (2)
+Description:
+- Uploads that fail with a 5xx from storage are retried up to three times with backoff instead of being dropped.
+
+### PR #44: Refactor upload tests
+Areas: src/upload (4)
+Description:
+- Moves upload fixtures into a shared helper. No behavior change.
+"""
+
+PR_GOOD_SAMPLE_RESPONSE = """
+- Added configurable log levels and optional log-file output, defaulting to the existing behavior (#41)
+- Uploads now retry automatically after temporary storage errors instead of failing (#43)
+"""
+
+PR_CITATION_RULES = """
+The changes below are listed as merged pull requests. Rules:
+- End every bullet with the pull request number(s) it is based on, e.g. "(#123)" or "(#123, #130)".
+- Only cite pull request numbers that appear below.
+- Combine related pull requests into one bullet; leave out pull requests with no user-visible effect.
+- Describe only what the titles and descriptions support. Do not speculate.
 """
 
 
@@ -299,11 +337,364 @@ def get_compare_diff(github_api_url: str, repo: str, from_release: str, to_relea
     return diff_content, stats
 
 
+SKIPPED_PR_TITLE = re.compile(
+    r"^(?:(?:chore|ci|build|test|tests|docs)(?:\([^)]*\))?!?:|bump\b|release\s+v?\d)",
+    re.IGNORECASE,
+)
+SKIPPED_COMMIT_SUBJECT = re.compile(
+    r"^(?:Merge (?:branch|remote-tracking branch|pull request)\b|bump\b|release\s+v?\d)",
+    re.IGNORECASE,
+)
+# PR description sections that never matter to release readers, written as a
+# heading ("### Tests"), a top-level bullet ("- Tests") or a bare label line.
+INTERNAL_BODY_SECTION = (
+    r"(?:live environment|implementation(?: details| notes)?|tests?|testing|test plan|"
+    r"checklist|screenshots?|how to test)"
+)
+INTERNAL_BODY_LABEL = re.compile(
+    rf"^(?:#{{1,6}}\s*|[-*]\s+)?\**{INTERNAL_BODY_SECTION}\**\s*:?\s*$", re.IGNORECASE
+)
+MARKDOWN_HEADING = re.compile(r"^#{1,6}\s")
+TOP_LEVEL_BULLET = re.compile(r"^[-*]\s")
+CITATION_GROUP = re.compile(
+    r"\s*\(\s*((?:PRs?\s*)?#\d+(?:\s*(?:,|and)\s*(?:PRs?\s*)?#\d+)*)\s*\)\s*\.?\s*$", re.IGNORECASE
+)
+
+# generate_ai_summary truncates the whole prompt at 32000 characters; keep the
+# pull request context below that so nothing is cut from the end.
+PR_CONTEXT_BUDGET = 28000
+MAX_PR_BODY = 4000
+MIN_USEFUL_PR_BODY = 200
+MAX_DIRECT_COMMITS = 40
+
+
+def graphql_url(github_api_url: str) -> str:
+    """Map the REST API URL to the GraphQL endpoint (github.com and GHES)."""
+    url = github_api_url.rstrip("/")
+    if url.endswith("/v3"):
+        return url[:-len("v3")] + "graphql"
+    return url + "/graphql"
+
+
+def run_graphql(github_api_url: str, authorization_header: dict, query: str, variables: dict):
+    response = requests.post(
+        graphql_url(github_api_url),
+        headers=authorization_header,
+        json={"query": query, "variables": variables},
+    )
+    if response.status_code != requests.codes.ok:
+        print(f"GraphQL request failed: {response.status_code}")
+        print(f"Response: {response.text}")
+        return None
+    payload = response.json()
+    if payload.get("errors"):
+        print(f"GraphQL errors: {payload['errors']}")
+    return payload.get("data")
+
+
+def list_range_commits(github_api_url: str, repo: str, from_release: str, to_release: str,
+                       authorization_header: dict):
+    """List every commit between two refs, paging past the 250-commit compare limit."""
+    compare_url = f"{github_api_url}/repos/{repo}/compare/{from_release}...{to_release}"
+    commits = []
+    seen = set()
+    page = 1
+    while True:
+        response = requests.get(
+            compare_url, headers=authorization_header, params={"per_page": 100, "page": page}
+        )
+        if response.status_code != requests.codes.ok:
+            print(f"Failed to list commits for {repo}: {response.status_code}")
+            print(f"Response: {response.text}")
+            return None
+        compare_data = response.json()
+        batch = compare_data.get("commits", [])
+        for commit in batch:
+            if commit["sha"] not in seen:
+                seen.add(commit["sha"])
+                commits.append(commit)
+        if not batch or len(commits) >= compare_data.get("total_commits", 0) or page >= 20:
+            return commits
+        page += 1
+
+
+def find_merged_pull_requests(github_api_url: str, repo: str, commits: list,
+                              authorization_header: dict):
+    """
+    Map the commits of a release range to the pull requests that merged them.
+    A pull request belongs to the range when its merge commit is in the range,
+    which covers merge, squash and rebase merges alike.
+    Returns (pull request numbers, commits that did not arrive through a pull request).
+    """
+    owner, name = repo.split("/", 1)
+    range_shas = {commit["sha"] for commit in commits}
+    numbers = set()
+    direct_commits = []
+
+    for start in range(0, len(commits), 50):
+        chunk = commits[start:start + 50]
+        fields = "\n".join(
+            f'c{index}: object(oid: "{commit["sha"]}") {{ ... on Commit {{ '
+            f'associatedPullRequests(first: 10) {{ nodes {{ number mergeCommit {{ oid }} }} }} }} }}'
+            for index, commit in enumerate(chunk)
+        )
+        query = f"query($owner: String!, $name: String!) {{ repository(owner: $owner, name: $name) {{ {fields} }} }}"
+        data = run_graphql(github_api_url, authorization_header, query, {"owner": owner, "name": name})
+        if data is None:
+            return None, None
+        repository = data.get("repository") or {}
+
+        for index, commit in enumerate(chunk):
+            nodes = ((repository.get(f"c{index}") or {}).get("associatedPullRequests") or {}).get("nodes") or []
+            merged_here = [
+                node["number"] for node in nodes
+                if node and (node.get("mergeCommit") or {}).get("oid") in range_shas
+            ]
+            if merged_here:
+                numbers.update(merged_here)
+            elif len(commit.get("parents", [])) < 2:
+                direct_commits.append(commit)
+
+    return sorted(numbers), direct_commits
+
+
+def fetch_pull_requests(github_api_url: str, repo: str, numbers: list, authorization_header: dict) -> list:
+    """Fetch title, description, labels, touched paths and commit headlines for pull requests."""
+    owner, name = repo.split("/", 1)
+    pull_requests = []
+
+    for start in range(0, len(numbers), 20):
+        chunk = numbers[start:start + 20]
+        fields = "\n".join(
+            f"p{number}: pullRequest(number: {number}) {{ number title body url "
+            f"author {{ login __typename }} labels(first: 20) {{ nodes {{ name }} }} "
+            f"files(first: 100) {{ nodes {{ path }} }} "
+            f"commits(first: 30) {{ nodes {{ commit {{ messageHeadline }} }} }} }}"
+            for number in chunk
+        )
+        query = f"query($owner: String!, $name: String!) {{ repository(owner: $owner, name: $name) {{ {fields} }} }}"
+        data = run_graphql(github_api_url, authorization_header, query, {"owner": owner, "name": name})
+        if data is None:
+            return None
+        repository = data.get("repository") or {}
+
+        for number in chunk:
+            node = repository.get(f"p{number}")
+            if not node:
+                print(f"Warning: could not fetch PR #{number} in {repo}")
+                continue
+            pull_requests.append({
+                "number": node["number"],
+                "title": node.get("title") or "",
+                "body": node.get("body") or "",
+                "url": node.get("url") or "",
+                "author": node.get("author") or {},
+                "labels": [label["name"] for label in (node.get("labels") or {}).get("nodes") or []],
+                "paths": [file["path"] for file in (node.get("files") or {}).get("nodes") or []],
+                "commits": [
+                    item["commit"]["messageHeadline"]
+                    for item in (node.get("commits") or {}).get("nodes") or []
+                ],
+            })
+
+    return pull_requests
+
+
+def pull_request_skip_reason(pull_request: dict, exclude_labels: set):
+    """Return why a pull request should stay out of the release notes, or None."""
+    author = pull_request.get("author") or {}
+    if author.get("__typename") == "Bot":
+        return f"bot author {author.get('login')}"
+    matched_labels = {label.lower() for label in pull_request["labels"]} & exclude_labels
+    if matched_labels:
+        return f"label {', '.join(sorted(matched_labels))}"
+    if SKIPPED_PR_TITLE.match(pull_request["title"].strip()):
+        return "title"
+    return None
+
+
+def clean_pull_request_body(body: str) -> str:
+    """Strip comments, images and internal sections (preview links, implementation, tests) from a PR body."""
+    body = re.sub(r"<!--.*?-->", "", body, flags=re.DOTALL)
+    body = re.sub(r"!\[[^\]]*\]\([^)]*\)", "", body)
+    body = re.sub(r"<img\b[^>]*>", "", body, flags=re.IGNORECASE)
+
+    # skip_scope records what opened the skipped section, and so what closes it:
+    # a heading section runs to the next heading, a label section to the next
+    # unindented paragraph, a bullet section to the next top-level bullet.
+    kept = []
+    skip_scope = None
+    for line in body.replace("\r\n", "\n").splitlines():
+        stripped = line.strip()
+        internal = bool(INTERNAL_BODY_LABEL.match(stripped))
+        if MARKDOWN_HEADING.match(stripped):
+            skip_scope = "heading" if internal else None
+        elif TOP_LEVEL_BULLET.match(line):
+            if internal and skip_scope is None:
+                skip_scope = "bullet"
+            elif not internal and skip_scope == "bullet":
+                skip_scope = None
+        elif stripped and line == line.lstrip():
+            if internal and skip_scope != "heading":
+                skip_scope = "label"
+            elif not internal and skip_scope in ("label", "bullet"):
+                skip_scope = None
+        if skip_scope is None:
+            kept.append(line.rstrip())
+
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(kept)).strip()
+
+
+def summarize_paths(paths: list, limit: int = 6) -> str:
+    counts = {}
+    for path in paths:
+        directory = os.path.dirname(path) or "."
+        counts[directory] = counts.get(directory, 0) + 1
+    ranked = sorted(counts.items(), key=lambda item: (-item[1], item[0]))[:limit]
+    return ", ".join(f"{directory} ({count})" for directory, count in ranked)
+
+
+def truncate_text(text: str, limit: int) -> str:
+    if len(text) <= limit:
+        return text
+    if limit <= 0:
+        return ""
+    cut = text[:limit]
+    newline = cut.rfind("\n")
+    if newline > limit * 0.6:
+        cut = cut[:newline]
+    return cut.rstrip() + "\n(…truncated)"
+
+
+def allocate_budgets(lengths: list, budget: int) -> list:
+    """Split a character budget so short texts stay whole and long ones share the rest evenly."""
+    allocation = [0] * len(lengths)
+    remaining = max(budget, 0)
+    order = sorted(range(len(lengths)), key=lambda index: lengths[index])
+    for position, index in enumerate(order):
+        share = remaining // (len(order) - position)
+        allocation[index] = min(lengths[index], share)
+        remaining -= allocation[index]
+    return allocation
+
+
+def build_pull_request_context(pull_requests: list, direct_subjects: list,
+                               budget: int = PR_CONTEXT_BUDGET) -> str:
+    """Render pull requests (and commits pushed without one) as prompt context within a budget."""
+    headers = []
+    details = []
+    for pull_request in pull_requests:
+        header = f"### PR #{pull_request['number']}: {pull_request['title']}\n"
+        if pull_request["labels"]:
+            header += f"Labels: {', '.join(pull_request['labels'])}\n"
+        areas = summarize_paths(pull_request["paths"])
+        if areas:
+            header += f"Areas: {areas}\n"
+        headers.append(header)
+
+        body = clean_pull_request_body(pull_request["body"])
+        detail = f"Description:\n{body}\n" if body else ""
+        if len(body) < MIN_USEFUL_PR_BODY and pull_request["commits"]:
+            detail += "Commits:\n" + "".join(f"- {headline}\n" for headline in pull_request["commits"])
+        details.append(truncate_text(detail, MAX_PR_BODY))
+
+    direct_section = ""
+    if direct_subjects:
+        direct_section = "\n### Commits pushed without a pull request (cite nothing for these)\n"
+        direct_section += "".join(f"- {subject}\n" for subject in direct_subjects[:MAX_DIRECT_COMMITS])
+
+    detail_budget = budget - sum(len(header) + 1 for header in headers) - len(direct_section)
+    allocations = allocate_budgets([len(detail) for detail in details], detail_budget)
+
+    context = ""
+    for header, detail, allocation in zip(headers, details, allocations):
+        context += "\n" + header + truncate_text(detail, allocation)
+    return context + direct_section
+
+
+def get_pull_request_context(github_api_url: str, repo: str, from_release: str, to_release: str,
+                             authorization_header: dict, exclude_labels: set):
+    """
+    Build summary context from the pull requests merged between two releases.
+    Returns (context, {number: pull request}, commit count), or (None, None, None) when
+    the pull requests could not be resolved and the caller should fall back to the diff.
+    """
+    print(f"Collecting pull requests for {repo}: {from_release} -> {to_release}")
+    commits = list_range_commits(github_api_url, repo, from_release, to_release, authorization_header)
+    if commits is None:
+        return None, None, None
+
+    numbers, direct_commits = find_merged_pull_requests(github_api_url, repo, commits, authorization_header)
+    if numbers is None:
+        return None, None, None
+
+    fetched = fetch_pull_requests(github_api_url, repo, numbers, authorization_header)
+    if fetched is None:
+        return None, None, None
+
+    included = []
+    for pull_request in fetched:
+        reason = pull_request_skip_reason(pull_request, exclude_labels)
+        if reason:
+            print(f"  Skipping PR #{pull_request['number']} ({reason}): {pull_request['title']}")
+        else:
+            included.append(pull_request)
+
+    direct_subjects = []
+    for commit in direct_commits:
+        subject = commit.get("commit", {}).get("message", "").split("\n")[0]
+        if subject and not SKIPPED_COMMIT_SUBJECT.match(subject):
+            direct_subjects.append(subject)
+
+    print(
+        f"  {len(commits)} commits, {len(numbers)} merged PRs, {len(included)} included, "
+        f"{len(direct_subjects)} commits without a PR"
+    )
+
+    if not included and not direct_subjects:
+        return "", {}, len(commits)
+
+    context = PR_CITATION_RULES + build_pull_request_context(included, direct_subjects)
+    print(f"  Pull request context: {len(context)} characters")
+    return context, {pull_request["number"]: pull_request for pull_request in included}, len(commits)
+
+
+def link_pull_request_citations(summary: str, pull_requests: dict) -> str:
+    """
+    Turn trailing "(#12, #15)" citations into links to the source pull requests.
+    Bullets that only cite pull requests outside the release range are dropped.
+    """
+    lines = []
+    for line in summary.splitlines():
+        stripped = line.strip()
+        if not re.match(r"^[-*]\s+", stripped):
+            lines.append(line)
+            continue
+
+        match = CITATION_GROUP.search(line)
+        if not match:
+            print(f"Warning: bullet without a pull request citation kept: {stripped}")
+            lines.append(line)
+            continue
+
+        cited = list(dict.fromkeys(int(number) for number in re.findall(r"\d+", match.group(1))))
+        valid = [number for number in cited if number in pull_requests]
+        if not valid:
+            print(f"Warning: dropping bullet citing pull requests outside the range {cited}: {stripped}")
+            continue
+
+        links = ", ".join(f"[#{number}]({pull_requests[number]['url']})" for number in valid)
+        lines.append(f"{line[:match.start()]} ({links})")
+
+    return "\n".join(lines)
+
+
 def generate_ai_summary(diff_content: str, repo: str, from_release: str, to_release: str,
                         openai_api_key: str, azure_openai_api_key: str, 
                         azure_openai_endpoint: str, azure_openai_version: str,
                         model: str, max_tokens: int, temperature: float,
-                        custom_prompt: str) -> str:
+                        custom_prompt: str, example_prompt: str = SAMPLE_PROMPT,
+                        example_response: str = GOOD_SAMPLE_RESPONSE) -> str:
     """
     Generate AI summary for the diff content.
     """
@@ -324,8 +715,8 @@ def generate_ai_summary(diff_content: str, repo: str, from_release: str, to_rele
             "role": "system",
             "content": "You are a helpful assistant who writes brief, concise release summaries. Each bullet point should cover a distinct change without overlapping with others. Be complete but not extensive. No headers, no lengthy explanations - just the key changes."
         },
-        {"role": "user", "content": SAMPLE_PROMPT},
-        {"role": "assistant", "content": GOOD_SAMPLE_RESPONSE},
+        {"role": "user", "content": example_prompt},
+        {"role": "assistant", "content": example_response},
         {"role": "user", "content": completion_prompt},
     ]
     
@@ -565,6 +956,16 @@ def main():
         "--generate-test-plan", type=str, required=False, default="false",
         help="Generate a test plan based on changes and frontend context"
     )
+    parser.add_argument(
+        "--context-source", type=str, required=False, default="diff",
+        choices=["diff", "pull_requests"],
+        help="Summarize repositories from the raw diff or from the merged pull requests"
+    )
+    parser.add_argument(
+        "--exclude-labels", type=str, required=False,
+        default="dependencies,ci,chore,skip-changelog,skip-release-notes,no-release-notes",
+        help="Comma-separated pull request labels to leave out (pull_requests context only)"
+    )
     
     args = parser.parse_args()
     
@@ -592,6 +993,8 @@ def main():
     }
     
     include_stats = args.include_diff_stats.lower() == "true"
+    use_pull_requests = args.context_source == "pull_requests"
+    exclude_labels = {label.strip().lower() for label in args.exclude_labels.split(",") if label.strip()}
     
     # Collect all summaries
     all_summaries = []
@@ -612,14 +1015,56 @@ def main():
         print(f"From: {from_release} -> To: {to_release}")
         print(f"{'='*60}")
         
-        # Get the diff
-        diff_content, stats = get_compare_diff(
-            args.github_api_url, repo, from_release, to_release, authorization_header
-        )
+        summary = None
+        stats = None
+        pr_context = None
         
-        if not diff_content:
-            print(f"Could not get diff for {repo}, skipping...")
-            continue
+        if use_pull_requests:
+            pr_context, pull_requests, commit_count = get_pull_request_context(
+                args.github_api_url, repo, from_release, to_release,
+                authorization_header, exclude_labels
+            )
+            if pr_context is None:
+                print(f"Could not resolve pull requests for {repo}, falling back to the diff...")
+            elif not pr_context:
+                print(f"No release-relevant pull requests or commits for {repo}, skipping...")
+                continue
+            else:
+                if include_stats:
+                    _, stats = get_compare_diff(
+                        args.github_api_url, repo, from_release, to_release, authorization_header
+                    )
+                stats = stats or {
+                    "total_commits": commit_count, "files_changed": 0, "additions": 0, "deletions": 0,
+                }
+                summary = generate_ai_summary(
+                    pr_context, repo, from_release, to_release,
+                    args.openai_api_key, args.azure_openai_api_key,
+                    args.azure_openai_endpoint, args.azure_openai_version,
+                    args.openai_model, args.max_tokens, args.temperature,
+                    args.custom_prompt, PR_SAMPLE_PROMPT, PR_GOOD_SAMPLE_RESPONSE
+                )
+                if summary:
+                    summary = link_pull_request_citations(summary, pull_requests)
+        
+        if pr_context is None:
+            # Get the diff
+            diff_content, stats = get_compare_diff(
+                args.github_api_url, repo, from_release, to_release, authorization_header
+            )
+            
+            if not diff_content:
+                print(f"Could not get diff for {repo}, skipping...")
+                continue
+            
+            # Generate AI summary
+            summary = generate_ai_summary(
+                diff_content, repo, from_release, to_release,
+                args.openai_api_key, args.azure_openai_api_key,
+                args.azure_openai_endpoint, args.azure_openai_version,
+                args.openai_model, args.max_tokens, args.temperature,
+                args.custom_prompt
+            )
         
         # Store stats
         if stats:
@@ -627,15 +1072,6 @@ def main():
             stats["from_release"] = from_release
             stats["to_release"] = to_release
             all_stats.append(stats)
-        
-        # Generate AI summary
-        summary = generate_ai_summary(
-            diff_content, repo, from_release, to_release,
-            args.openai_api_key, args.azure_openai_api_key,
-            args.azure_openai_endpoint, args.azure_openai_version,
-            args.openai_model, args.max_tokens, args.temperature,
-            args.custom_prompt
-        )
         
         if summary:
             all_summaries.append({

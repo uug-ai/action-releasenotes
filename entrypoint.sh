@@ -44,4 +44,6 @@ fi
   --include-diff-stats "${INPUT_INCLUDE_DIFF_STATS:-true}" \
   --custom-prompt "${INPUT_CUSTOM_PROMPT:-}" \
   --frontend-context-file "${INPUT_FRONTEND_CONTEXT_FILE:-}" \
-  --generate-test-plan "${INPUT_GENERATE_TEST_PLAN:-false}"
+  --generate-test-plan "${INPUT_GENERATE_TEST_PLAN:-false}" \
+  --context-source "${INPUT_CONTEXT_SOURCE:-diff}" \
+  --exclude-labels "${INPUT_EXCLUDE_LABELS:-dependencies,ci,chore,skip-changelog,skip-release-notes,no-release-notes}"
