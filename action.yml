@@ -60,6 +60,14 @@ inputs:
     description: 'Generate a test plan based on the changes and frontend context'
     required: false
     default: 'false'
+  context_source:
+    description: 'What each repository summary is built from: "diff" (raw file patches and commit subjects) or "pull_requests" (titles and descriptions of the pull requests merged between the two releases, with each bullet linked to its pull requests)'
+    required: false
+    default: 'diff'
+  exclude_labels:
+    description: 'Comma-separated pull request labels to leave out of the release notes (pull_requests context only)'
+    required: false
+    default: 'dependencies,ci,chore,skip-changelog,skip-release-notes,no-release-notes'
 outputs:
   release_notes:
     description: 'The generated release notes markdown'
