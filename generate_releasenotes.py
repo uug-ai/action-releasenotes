@@ -659,10 +659,10 @@ def get_pull_request_context(github_api_url: str, repo: str, from_release: str, 
     return context, {pull_request["number"]: pull_request for pull_request in included}, len(commits)
 
 
-def link_pull_request_citations(summary: str, pull_requests: dict) -> str:
+def link_citations(summary: str, citation_group, parse_ids, links: dict, kind: str) -> str:
     """
-    Turn trailing "(#12, #15)" citations into links to the source pull requests.
-    Bullets that only cite pull requests outside the release range are dropped.
+    Turn a bullet's trailing citation group into links ({id: (text, url)}).
+    Bullets that only cite sources outside the release range are dropped.
     """
     lines = []
     for line in summary.splitlines():
@@ -671,22 +671,414 @@ def link_pull_request_citations(summary: str, pull_requests: dict) -> str:
             lines.append(line)
             continue
 
-        match = CITATION_GROUP.search(line)
+        match = citation_group.search(line)
         if not match:
-            print(f"Warning: bullet without a pull request citation kept: {stripped}")
+            print(f"Warning: bullet without a {kind} citation kept: {stripped}")
             lines.append(line)
             continue
 
-        cited = list(dict.fromkeys(int(number) for number in re.findall(r"\d+", match.group(1))))
-        valid = [number for number in cited if number in pull_requests]
+        cited = list(dict.fromkeys(parse_ids(match.group(1))))
+        valid = [source for source in cited if source in links]
         if not valid:
-            print(f"Warning: dropping bullet citing pull requests outside the range {cited}: {stripped}")
+            print(f"Warning: dropping bullet citing {kind}s outside the range {cited}: {stripped}")
             continue
 
-        links = ", ".join(f"[#{number}]({pull_requests[number]['url']})" for number in valid)
-        lines.append(f"{line[:match.start()]} ({links})")
+        rendered = ", ".join(f"[{links[source][0]}]({links[source][1]})" for source in valid)
+        lines.append(f"{line[:match.start()]} ({rendered})")
 
     return "\n".join(lines)
+
+
+def link_pull_request_citations(summary: str, pull_requests: dict) -> str:
+    """Turn trailing "(#12, #15)" citations into links to the source pull requests."""
+    links = {number: (f"#{number}", pull_request["url"]) for number, pull_request in pull_requests.items()}
+    return link_citations(
+        summary, CITATION_GROUP,
+        lambda group: [int(number) for number in re.findall(r"\d+", group)],
+        links, "pull request",
+    )
+
+
+def link_commit_citations(summary: str, commits: dict) -> str:
+    """Turn trailing "(3f2a9c1, 8d41e07)" citations into links to the source commits ({short sha: url})."""
+    links = {short_sha: (short_sha, url) for short_sha, url in commits.items()}
+    return link_citations(
+        summary, COMMIT_CITATION_GROUP,
+        lambda group: [sha[:SHORT_SHA_LENGTH].lower() for sha in re.findall(r"[0-9a-fA-F]{7,40}", group)],
+        links, "commit",
+    )
+
+
+# --- Shared code filtering (commit fallback and code context) ---------------
+
+# Paths whose changes never describe product behavior: tests, CI, vendored,
+# lock and generated files.
+EXCLUDED_CODE_PATH = re.compile(
+    r"(?:^|/)(?:\.github|\.devcontainer|\.vscode|tests?|__tests__|__mocks__|testdata|fixtures|"
+    r"vendor|node_modules|dist)/"
+    r"|_test\.go$|\.(?:spec|test)\.[cm]?[jt]sx?$|(?:^|/)test_[^/]*\.py$|_test\.py$"
+    r"|(?:^|/)(?:go\.sum|package-lock\.json|yarn\.lock|pnpm-lock\.yaml|poetry\.lock|Cargo\.lock|composer\.lock)$"
+    r"|\.min\.(?:js|css)$|\.pb\.go$|_gen\.go$|\.generated\.|\.snap$|\.map$"
+    r"|(?:^|/)docs/(?:docs\.go|swagger\.(?:json|ya?ml))$",
+    re.IGNORECASE,
+)
+# Translation catalogs: only the English source catalog says what changed.
+TRANSLATION_CATALOG = re.compile(r"(?:^|/)i18n/[^/]+\.json$", re.IGNORECASE)
+
+
+def is_reviewable_code(path: str) -> bool:
+    if EXCLUDED_CODE_PATH.search(path):
+        return False
+    if TRANSLATION_CATALOG.search(path) and not path.lower().endswith("/en.json"):
+        return False
+    return True
+
+
+def format_file_patch(file_info: dict, limit: int) -> str:
+    header = (
+        f"File: {file_info.get('filename', 'unknown')} ({file_info.get('status', 'modified')}, "
+        f"+{file_info.get('additions', 0)}/-{file_info.get('deletions', 0)})\n"
+    )
+    return header + truncate_text(file_info.get("patch") or "", max(limit - len(header), 0)) + "\n"
+
+
+def pack_sections(sections: list, budget: int) -> list:
+    """Greedily pack sections, in order, into chunks of at most budget characters."""
+    chunks = []
+    current = ""
+    for section in sections:
+        section = truncate_text(section, budget)
+        if current and len(current) + len(section) + 1 > budget:
+            chunks.append(current)
+            current = ""
+        current += ("\n" if current else "") + section
+    if current:
+        chunks.append(current)
+    return chunks
+
+
+# --- Commit context ---------------------------------------------------------
+
+COMMIT_SAMPLE_PROMPT = """
+Write a brief summary of the key changes in this release. Be concise, complete, and avoid redundancy. Each bullet point should cover a distinct change.
+
+Repository: example/repo
+Comparing: v1.0.0 → v1.1.0
+
+### Commit 3f2a9c1: Add configurable log levels
+Adds `log_level` and `log_file` settings so operators can tune verbosity and
+write logs to disk. Defaults to INFO; existing deployments keep their output.
+
+### Commit 8d41e07: Retry uploads after transient storage errors
+Uploads that fail with a 5xx from storage are retried up to three times with
+backoff instead of being dropped.
+
+### Commit b77c210: Move upload fixtures into a shared helper
+No behavior change.
+
+### Commit e09a5f3: Fix crash
+No description; code changes:
+File: src/player.ts (modified, +2/-1)
+@@ -40,7 +40,8 @@
+-  const first = items[0].url;
++  if (!items.length) return;
++  const first = items[0].url;
+"""
+
+COMMIT_GOOD_SAMPLE_RESPONSE = """
+- Added configurable log levels and optional log-file output, defaulting to the existing behavior (3f2a9c1)
+- Uploads now retry automatically after temporary storage errors instead of failing (8d41e07)
+- The player no longer crashes on a recording without media items (e09a5f3)
+"""
+
+COMMIT_CITATION_RULES = """
+The changes below are the commits in this release, oldest first, each with its message. Commits without a description show their code changes instead. Rules:
+- End every bullet with the commit id(s) it is based on, e.g. "(3f2a9c1)" or "(3f2a9c1, 8d41e07)".
+- Only cite commit ids that appear below.
+- Combine related commits into one bullet; leave out commits with no user-visible effect, such as tests, refactors and tooling.
+- Later commits can refine or undo earlier ones; describe the end result.
+- Describe only what the messages and code support. Do not speculate.
+"""
+
+SHORT_SHA_LENGTH = 7
+COMMIT_CITATION_GROUP = re.compile(
+    r"\s*\(\s*((?:commits?\s*)?[0-9a-fA-F]{7,40}(?:\s*(?:,|and)\s*[0-9a-fA-F]{7,40})*)\s*\)\s*\.?\s*$",
+    re.IGNORECASE,
+)
+COMMIT_TRAILER = re.compile(
+    r"^(?:co-authored-by|signed-off-by|reviewed-by|acked-by|tested-by|change-id|cc):", re.IGNORECASE
+)
+GENERATED_WITH_LINE = re.compile(r"generated with \[?claude code", re.IGNORECASE)
+CODING_AGENT_LOGIN = re.compile(r"^(?:copilot|claude|devin)", re.IGNORECASE)
+
+COMMIT_CONTEXT_BUDGET = 28000
+MAX_COMMIT_BODY = 4000
+# Commits whose cleaned body is shorter than this get their code instead.
+MIN_USEFUL_COMMIT_BODY = 40
+MAX_CODE_FALLBACKS = 20
+COMMIT_CODE_LIMIT = 3000
+
+
+def clean_commit_message(message: str):
+    """Split a commit message into its subject and a body without trailers."""
+    lines = message.replace("\r\n", "\n").split("\n")
+    subject = lines[0].strip()
+    body = [
+        line.rstrip() for line in lines[1:]
+        if not COMMIT_TRAILER.match(line.strip()) and not GENERATED_WITH_LINE.search(line)
+    ]
+    return subject, re.sub(r"\n{3,}", "\n\n", "\n".join(body)).strip()
+
+
+def commit_skip_reason(commit: dict):
+    """Return why a commit should stay out of the release notes, or None."""
+    if len(commit.get("parents", [])) > 1:
+        return "merge commit"
+    author = commit.get("author") or {}
+    login = author.get("login") or ""
+    # Coding agents such as Copilot are bots too, but write real changes.
+    if (author.get("type") == "Bot" or login.endswith("[bot]")) and not CODING_AGENT_LOGIN.match(login):
+        return f"bot author {login}"
+    subject = (commit.get("commit", {}).get("message") or "").split("\n")[0].strip()
+    if not subject or SKIPPED_COMMIT_SUBJECT.match(subject) or SKIPPED_PR_TITLE.match(subject):
+        return "subject"
+    return None
+
+
+def fetch_commit_code(github_api_url: str, repo: str, sha: str, authorization_header: dict,
+                      limit: int = COMMIT_CODE_LIMIT) -> str:
+    """The reviewable part of one commit's diff, cut to limit characters."""
+    response = requests.get(f"{github_api_url}/repos/{repo}/commits/{sha}", headers=authorization_header)
+    if response.status_code != requests.codes.ok:
+        print(f"  Could not fetch code for commit {sha[:SHORT_SHA_LENGTH]}: {response.status_code}")
+        return ""
+    files = [
+        file_info for file_info in response.json().get("files", [])
+        if file_info.get("patch") and is_reviewable_code(file_info.get("filename", ""))
+    ]
+    code = "".join(format_file_patch(file_info, limit) for file_info in files)
+    return truncate_text(code, limit)
+
+
+def build_commit_context(commits: list, budget: int = COMMIT_CONTEXT_BUDGET) -> str:
+    """Render commits ({sha, subject, body, code}) as prompt context within a budget."""
+    headers = [f"### Commit {commit['sha'][:SHORT_SHA_LENGTH]}: {commit['subject']}\n" for commit in commits]
+    details = []
+    for commit in commits:
+        if commit["body"]:
+            detail = commit["body"] + "\n"
+        elif commit.get("code"):
+            detail = "No description; code changes:\n" + commit["code"]
+        else:
+            detail = ""
+        details.append(truncate_text(detail, MAX_COMMIT_BODY))
+
+    detail_budget = budget - sum(len(header) + 1 for header in headers)
+    allocations = allocate_budgets([len(detail) for detail in details], detail_budget)
+
+    context = ""
+    for header, detail, allocation in zip(headers, details, allocations):
+        context += "\n" + header + truncate_text(detail, allocation)
+    return context
+
+
+def get_commit_context(github_api_url: str, repo: str, from_release: str, to_release: str,
+                       authorization_header: dict):
+    """
+    Build summary context from the full messages of the commits between two releases.
+    Commits without a useful description contribute their code instead.
+    Returns (context, {short sha: url}, commit count), or (None, None, None) when the
+    commits could not be listed and the caller should fall back to the diff.
+    """
+    print(f"Collecting commits for {repo}: {from_release} -> {to_release}")
+    commits = list_range_commits(github_api_url, repo, from_release, to_release, authorization_header)
+    if commits is None:
+        return None, None, None
+
+    included = []
+    code_fallbacks = 0
+    for commit in commits:
+        reason = commit_skip_reason(commit)
+        subject, body = clean_commit_message(commit.get("commit", {}).get("message") or "")
+        if reason:
+            if reason != "merge commit":
+                print(f"  Skipping commit {commit['sha'][:SHORT_SHA_LENGTH]} ({reason}): {subject}")
+            continue
+        entry = {"sha": commit["sha"], "subject": subject, "body": body, "url": commit.get("html_url") or ""}
+        if len(body) < MIN_USEFUL_COMMIT_BODY:
+            entry["body"] = ""
+            if code_fallbacks < MAX_CODE_FALLBACKS:
+                entry["code"] = fetch_commit_code(github_api_url, repo, commit["sha"], authorization_header)
+                code_fallbacks += 1
+        included.append(entry)
+
+    print(f"  {len(commits)} commits, {len(included)} included, {code_fallbacks} described by their code")
+    if not included:
+        return "", {}, len(commits)
+
+    context = COMMIT_CITATION_RULES + build_commit_context(included)
+    print(f"  Commit context: {len(context)} characters")
+    links = {
+        entry["sha"][:SHORT_SHA_LENGTH].lower(): entry["url"] or f"https://github.com/{repo}/commit/{entry['sha']}"
+        for entry in included
+    }
+    return context, links, len(commits)
+
+
+# --- Code context (two-step summary) ----------------------------------------
+
+CODE_REVIEW_SYSTEM = (
+    "You are a senior engineer reading code changes so that release notes can be written from them. "
+    "Be factual and brief."
+)
+CODE_REVIEW_PROMPT = """
+Below is part {part} of {parts} of the code changes in {repo} between {from_release} and {to_release}.
+List what changed in behavior, one short line per change, naming the file(s) involved:
+- new or changed API endpoints, settings, environment variables, UI, stored data, permissions and fixes
+- a renamed or moved function, a changed comment or annotation, formatting or a refactor is not a behavior change; skip it unless it changes what users or operators see
+- state only what the diff shows; do not guess at intent
+If nothing in this part changes behavior, answer exactly "No behavior changes."
+"""
+CODE_MERGE_PROMPT = """
+Merge these notes about code changes in {repo} into one shorter list. Combine notes about the same change and drop duplicates, but keep every distinct behavior change. One short line per change.
+"""
+CODE_SUMMARY_RULES = """
+The changes below are notes from reading the code changes of this release part by part. Combine notes about the same change into one bullet and leave out changes with no user-visible effect.
+"""
+CODE_SAMPLE_PROMPT = """
+Write a brief summary of the key changes in this release. Be concise, complete, and avoid redundancy. Each bullet point should cover a distinct change.
+
+Repository: example/repo
+Comparing: v1.0.0 → v1.1.0
+
+Part 1:
+- src/config.py: new `log_level` and `log_file` settings, default INFO
+- src/logging.py: logs are also written to the file named by `log_file` when set
+Part 2:
+- src/upload.py: uploads that fail with a 5xx are retried 3 times with exponential backoff
+- src/upload.py: retry helper moved into its own module (no behavior change)
+"""
+CODE_GOOD_SAMPLE_RESPONSE = """
+- Added configurable log levels and optional log-file output, defaulting to the existing behavior
+- Uploads now retry automatically after temporary storage errors instead of failing
+"""
+NO_BEHAVIOR_CHANGES = re.compile(r"^\W*no behavior changes\W*$", re.IGNORECASE)
+
+CODE_CHUNK_BUDGET = 24000
+CODE_NOTES_BUDGET = 28000
+MAX_CODE_CHUNKS = 40
+MAX_MERGE_ROUNDS = 3
+
+
+def condense_notes(notes: list, repo: str, model_settings: dict, budget: int = CODE_NOTES_BUDGET) -> str:
+    """Merge per-part notes with the model until they fit the budget."""
+    for _ in range(MAX_MERGE_ROUNDS):
+        if len("\n".join(notes)) <= budget or len(notes) < 2:
+            break
+        groups = pack_sections(notes, budget)
+        if len(groups) == len(notes):
+            # Every note already fills a group alone; merge them pairwise instead.
+            groups = ["\n".join(notes[index:index + 2]) for index in range(0, len(notes), 2)]
+        merged = []
+        for group in groups:
+            result = complete_chat([
+                {"role": "system", "content": CODE_REVIEW_SYSTEM},
+                {"role": "user", "content": CODE_MERGE_PROMPT.format(repo=repo) + "\n" + truncate_text(group, budget)},
+            ], model_settings)
+            merged.append(result.strip() if result else truncate_text(group, budget // len(groups)))
+        notes = merged
+    return truncate_text("\n".join(notes), budget)
+
+
+def get_code_context(github_api_url: str, repo: str, from_release: str, to_release: str,
+                     authorization_header: dict, model_settings: dict):
+    """
+    Build summary context by reading the whole code diff in parts: each part is
+    summarized into behavior notes, and the notes are merged until they fit one prompt.
+    Returns (context, stats), or (None, None) when the comparison could not be fetched.
+    """
+    print(f"Reading code changes for {repo}: {from_release} -> {to_release}")
+    response = requests.get(
+        f"{github_api_url}/repos/{repo}/compare/{from_release}...{to_release}",
+        headers=authorization_header, params={"per_page": 1},
+    )
+    if response.status_code != requests.codes.ok:
+        print(f"Failed to get comparison for {repo}: {response.status_code}")
+        print(f"Response: {response.text}")
+        return None, None
+    compare_data = response.json()
+    files = sorted(compare_data.get("files", []), key=lambda file_info: file_info.get("filename", ""))
+    stats = {
+        "total_commits": compare_data.get("total_commits", 0),
+        "files_changed": len(files),
+        "additions": sum(file_info.get("additions", 0) for file_info in files),
+        "deletions": sum(file_info.get("deletions", 0) for file_info in files),
+    }
+
+    reviewable = [file_info for file_info in files if is_reviewable_code(file_info.get("filename", ""))]
+    sections = [format_file_patch(file_info, CODE_CHUNK_BUDGET) for file_info in reviewable if file_info.get("patch")]
+    without_patch = [
+        f"{file_info['filename']} (+{file_info.get('additions', 0)}/-{file_info.get('deletions', 0)})"
+        for file_info in reviewable if not file_info.get("patch")
+    ]
+    chunks = pack_sections(sections, CODE_CHUNK_BUDGET)
+    print(
+        f"  {len(files)} files, {len(reviewable)} reviewable, {len(without_patch)} without a diff, "
+        f"{sum(len(section) for section in sections)} characters in {len(chunks)} part(s)"
+    )
+    if len(chunks) > MAX_CODE_CHUNKS:
+        print(f"Warning: reading only the first {MAX_CODE_CHUNKS} of {len(chunks)} parts for {repo}")
+        chunks = chunks[:MAX_CODE_CHUNKS]
+
+    notes = []
+    for part, chunk in enumerate(chunks, 1):
+        prompt = CODE_REVIEW_PROMPT.format(
+            part=part, parts=len(chunks), repo=repo, from_release=from_release, to_release=to_release
+        )
+        result = complete_chat([
+            {"role": "system", "content": CODE_REVIEW_SYSTEM},
+            {"role": "user", "content": prompt + "\n" + chunk},
+        ], model_settings)
+        if result and not NO_BEHAVIOR_CHANGES.match(result.strip()):
+            notes.append(f"Part {part}:\n{result.strip()}")
+    if without_patch:
+        notes.append("Files changed without a viewable diff (too large or binary): " + ", ".join(without_patch))
+
+    if not notes:
+        return "", stats
+
+    context = CODE_SUMMARY_RULES + "\n" + condense_notes(notes, repo, model_settings)
+    print(f"  Code notes context: {len(context)} characters")
+    return context, stats
+
+
+def complete_chat(messages: list, model_settings: dict, max_tokens: int = None) -> str:
+    """Run one chat completion against OpenAI or Azure OpenAI; returns "" on missing configuration."""
+    openai_api_key = (model_settings.get("openai_api_key") or "").strip()
+    azure_openai_api_key = (model_settings.get("azure_openai_api_key") or "").strip()
+    azure_openai_endpoint = (model_settings.get("azure_openai_endpoint") or "").strip()
+    if openai_api_key:
+        client = openai.OpenAI(api_key=openai_api_key)
+    elif azure_openai_api_key:
+        if not azure_openai_endpoint:
+            print("Error: Azure OpenAI endpoint is required when using Azure OpenAI API key")
+            return ""
+        client = AzureOpenAI(
+            api_key=azure_openai_api_key,
+            azure_endpoint=azure_openai_endpoint,
+            api_version=(model_settings.get("azure_openai_version") or "").strip() or "2024-02-15-preview",
+        )
+    else:
+        print("Error: No API key provided (OpenAI or Azure OpenAI)")
+        print("Please ensure you have set either 'openai_api_key' or 'azure_openai_api_key' input")
+        return ""
+
+    response = client.chat.completions.create(
+        model=model_settings.get("model"),
+        messages=messages,
+        max_completion_tokens=max_tokens or model_settings.get("max_tokens"),
+    )
+    return response.choices[0].message.content or ""
 
 
 def generate_ai_summary(diff_content: str, repo: str, from_release: str, to_release: str,
@@ -719,48 +1111,16 @@ def generate_ai_summary(diff_content: str, repo: str, from_release: str, to_rele
         {"role": "assistant", "content": example_response},
         {"role": "user", "content": completion_prompt},
     ]
-    
-    generated_summary = ""
-    
-    # Check for non-empty API keys (strip whitespace and check for actual content)
-    has_openai_key = openai_api_key and openai_api_key.strip()
-    has_azure_key = azure_openai_api_key and azure_openai_api_key.strip()
-    
-    print(f"Debug: OpenAI API key provided: {has_openai_key}")
-    print(f"Debug: Azure OpenAI API key provided: {has_azure_key}")
-    
-    if has_openai_key:
-        print(f"Using OpenAI API for {repo}...")
-        client = openai.OpenAI(api_key=openai_api_key.strip())
-        response = client.chat.completions.create(
-            model=model,
-            messages=messages,
-            max_completion_tokens=max_tokens,
-        )
-        generated_summary = response.choices[0].message.content
-        
-    elif has_azure_key:
-        print(f"Using Azure OpenAI API for {repo}...")
-        if not azure_openai_endpoint or not azure_openai_endpoint.strip():
-            print("Error: Azure OpenAI endpoint is required when using Azure OpenAI API key")
-            return ""
-        client = AzureOpenAI(
-            api_key=azure_openai_api_key.strip(),
-            azure_endpoint=azure_openai_endpoint.strip(),
-            api_version=azure_openai_version.strip() if azure_openai_version else "2024-02-15-preview"
-        )
-        response = client.chat.completions.create(
-            model=model,
-            messages=messages,
-            max_completion_tokens=max_tokens,
-        )
-        generated_summary = response.choices[0].message.content
-    else:
-        print("Error: No API key provided (OpenAI or Azure OpenAI)")
-        print("Please ensure you have set either 'openai_api_key' or 'azure_openai_api_key' input")
-        return ""
-    
-    return generated_summary
+
+    print(f"Generating summary for {repo}...")
+    return complete_chat(messages, {
+        "openai_api_key": openai_api_key,
+        "azure_openai_api_key": azure_openai_api_key,
+        "azure_openai_endpoint": azure_openai_endpoint,
+        "azure_openai_version": azure_openai_version,
+        "model": model,
+        "max_tokens": max_tokens,
+    })
 
 
 def read_frontend_context(file_path: str) -> str:
@@ -958,8 +1318,9 @@ def main():
     )
     parser.add_argument(
         "--context-source", type=str, required=False, default="diff",
-        choices=["diff", "pull_requests"],
-        help="Summarize repositories from the raw diff or from the merged pull requests"
+        choices=["diff", "pull_requests", "commits", "code"],
+        help="Summarize repositories from the raw diff, the merged pull requests, the commit messages, "
+             "or the whole code diff read in parts"
     )
     parser.add_argument(
         "--exclude-labels", type=str, required=False,
@@ -993,8 +1354,16 @@ def main():
     }
     
     include_stats = args.include_diff_stats.lower() == "true"
-    use_pull_requests = args.context_source == "pull_requests"
     exclude_labels = {label.strip().lower() for label in args.exclude_labels.split(",") if label.strip()}
+    model_settings = {
+        "openai_api_key": args.openai_api_key,
+        "azure_openai_api_key": args.azure_openai_api_key,
+        "azure_openai_endpoint": args.azure_openai_endpoint,
+        "azure_openai_version": args.azure_openai_version,
+        "model": args.openai_model,
+        "max_tokens": args.max_tokens,
+    }
+    print(f"Context source: {args.context_source}")
     
     # Collect all summaries
     all_summaries = []
@@ -1017,37 +1386,55 @@ def main():
         
         summary = None
         stats = None
-        pr_context = None
-        
-        if use_pull_requests:
-            pr_context, pull_requests, commit_count = get_pull_request_context(
+        context = None
+        examples = None
+        link = None
+
+        if args.context_source == "pull_requests":
+            context, pull_requests, commit_count = get_pull_request_context(
                 args.github_api_url, repo, from_release, to_release,
                 authorization_header, exclude_labels
             )
-            if pr_context is None:
-                print(f"Could not resolve pull requests for {repo}, falling back to the diff...")
-            elif not pr_context:
-                print(f"No release-relevant pull requests or commits for {repo}, skipping...")
+            examples = (PR_SAMPLE_PROMPT, PR_GOOD_SAMPLE_RESPONSE)
+            link = lambda summary: link_pull_request_citations(summary, pull_requests)
+        elif args.context_source == "commits":
+            context, commit_links, commit_count = get_commit_context(
+                args.github_api_url, repo, from_release, to_release, authorization_header
+            )
+            examples = (COMMIT_SAMPLE_PROMPT, COMMIT_GOOD_SAMPLE_RESPONSE)
+            link = lambda summary: link_commit_citations(summary, commit_links)
+        elif args.context_source == "code":
+            context, stats = get_code_context(
+                args.github_api_url, repo, from_release, to_release, authorization_header, model_settings
+            )
+            examples = (CODE_SAMPLE_PROMPT, CODE_GOOD_SAMPLE_RESPONSE)
+
+        if args.context_source != "diff":
+            if context is None:
+                print(f"Could not build {args.context_source} context for {repo}, falling back to the diff...")
+            elif not context:
+                print(f"No release-relevant changes for {repo}, skipping...")
                 continue
             else:
-                if include_stats:
-                    _, stats = get_compare_diff(
-                        args.github_api_url, repo, from_release, to_release, authorization_header
-                    )
-                stats = stats or {
-                    "total_commits": commit_count, "files_changed": 0, "additions": 0, "deletions": 0,
-                }
+                if stats is None:
+                    if include_stats:
+                        _, stats = get_compare_diff(
+                            args.github_api_url, repo, from_release, to_release, authorization_header
+                        )
+                    stats = stats or {
+                        "total_commits": commit_count, "files_changed": 0, "additions": 0, "deletions": 0,
+                    }
                 summary = generate_ai_summary(
-                    pr_context, repo, from_release, to_release,
+                    context, repo, from_release, to_release,
                     args.openai_api_key, args.azure_openai_api_key,
                     args.azure_openai_endpoint, args.azure_openai_version,
                     args.openai_model, args.max_tokens, args.temperature,
-                    args.custom_prompt, PR_SAMPLE_PROMPT, PR_GOOD_SAMPLE_RESPONSE
+                    args.custom_prompt, *examples
                 )
-                if summary:
-                    summary = link_pull_request_citations(summary, pull_requests)
-        
-        if pr_context is None:
+                if summary and link:
+                    summary = link(summary)
+
+        if context is None:
             # Get the diff
             diff_content, stats = get_compare_diff(
                 args.github_api_url, repo, from_release, to_release, authorization_header
