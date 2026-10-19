@@ -144,7 +144,7 @@ jobs:
 | `custom_prompt` | Custom prompt for generating release notes | No | `''` |
 | `frontend_context_file` | Path to a .txt file with frontend app description for test plan generation | No | `''` |
 | `generate_test_plan` | Generate a test plan based on changes and frontend context | No | `false` |
-| `context_source` | Build each repository summary from the `diff` or from the merged `pull_requests` (see below) | No | `diff` |
+| `context_source` | Build each repository summary from the `diff`, the merged `pull_requests`, the `commits` messages, or the whole `code` diff (see below) | No | `diff` |
 | `exclude_labels` | Comma-separated pull request labels to leave out (`pull_requests` only) | No | `dependencies,ci,chore,skip-changelog,skip-release-notes,no-release-notes` |
 
 **Note:** At least one of `repositories` or `raw_diffs` must be provided.
@@ -203,6 +203,28 @@ If the pull requests cannot be resolved for a repository, that repository falls 
     azure_openai_api_key: ${{ secrets.AZURE_OPENAI_API_KEY }}
     azure_openai_endpoint: ${{ secrets.AZURE_OPENAI_ENDPOINT }}
 ```
+
+### Commit Context
+
+With `context_source: commits` the summary is built from the full messages of the commits between the two releases, oldest first:
+
+1. Merge commits, commits from bots such as Dependabot (coding agents such as Copilot are kept) and housekeeping subjects (`chore:`, `ci:`, `docs:`, `Bump …`, `Release v…`) are left out.
+2. `Co-authored-by`, `Signed-off-by` and similar trailers are removed from each message.
+3. A commit whose message has no real description (under 40 characters of body) is described by its own diff instead, without tests, lock files and generated files, cut at 3,000 characters. At most 20 commits per repository are read this way.
+4. The messages share a fixed character budget, so every commit is included and only long messages are shortened.
+5. The model ends every bullet with the commits it is based on. Those citations become links, and a bullet that cites only commits outside the range is dropped.
+
+### Code Context
+
+With `context_source: code` the summary is built from the whole code diff between the two releases, in two steps:
+
+1. Tests, CI files, lock files, generated files (`go.sum`, `*.pb.go`, Swagger output, minified files) and non-English translation catalogs are left out. Files GitHub returns without a diff are listed by name.
+2. The remaining patches are split into parts of about 24,000 characters (at most 40 per repository), and the model lists the behavior changes in each part.
+3. Those notes are merged until they fit one prompt, and the release-note bullets are written from them.
+
+This takes one model call per part plus one for the summary, so a large repository can take 20 or more calls. The bullets carry no citations.
+
+If the commits or the comparison cannot be fetched for a repository, that repository falls back to the diff.
 
 ### Example with Raw Diffs
 

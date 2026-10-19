@@ -145,5 +145,122 @@ class RangeMappingTest(unittest.TestCase):
         self.assertEqual([commit["sha"] for commit in direct], ["c" * 40])
 
 
+def commit(sha, message, parents=1, author=None):
+    return {
+        "sha": sha,
+        "parents": [{}] * parents,
+        "author": author or {"login": "someone", "type": "User"},
+        "html_url": f"https://github.com/example/repo/commit/{sha}",
+        "commit": {"message": message},
+    }
+
+
+class CommitMessageTest(unittest.TestCase):
+    def test_strips_trailers(self):
+        subject, body = notes.clean_commit_message(
+            "Cache heartbeat credentials\n\nOnly successes are cached.\n\n"
+            "Co-Authored-By: Claude <noreply@anthropic.com>\nSigned-off-by: Dev <dev@example.com>\n"
+        )
+        self.assertEqual(subject, "Cache heartbeat credentials")
+        self.assertEqual(body, "Only successes are cached.")
+
+    def test_skips_merges_bots_and_housekeeping(self):
+        self.assertEqual(notes.commit_skip_reason(commit("a" * 40, "Merge pull request #5", parents=2)), "merge commit")
+        self.assertIn("bot", notes.commit_skip_reason(commit("a" * 40, "Update deps", author={"login": "dependabot[bot]", "type": "Bot"})))
+        for subject in ("Bump models to v1.7.79", "chore: tidy", "Merge branch 'main'"):
+            self.assertEqual(notes.commit_skip_reason(commit("a" * 40, subject)), "subject", subject)
+        self.assertIsNone(notes.commit_skip_reason(commit("a" * 40, "fix(auth): restrict owner grants")))
+        self.assertIsNone(notes.commit_skip_reason(
+            commit("a" * 40, "fix(build): retry registry failures", author={"login": "Copilot", "type": "Bot"})
+        ))
+
+    def test_commits_without_description_use_their_code(self):
+        commits = [
+            commit("a" * 40, "Restrict owner-level role grants\n\nOnly owners may grant the owner role or edit owners."),
+            commit("b" * 40, "Fix crash"),
+            commit("c" * 40, "Merge pull request #5", parents=2),
+        ]
+        with mock.patch.object(notes, "list_range_commits", return_value=commits), \
+                mock.patch.object(notes, "fetch_commit_code", return_value="File: src/player.ts\n+guard\n") as fetch:
+            context, links, count = notes.get_commit_context("https://api.github.com", "example/repo", "v1", "v2", {})
+        fetch.assert_called_once()
+        self.assertEqual(count, 3)
+        self.assertEqual(set(links), {"aaaaaaa", "bbbbbbb"})
+        self.assertIn("### Commit aaaaaaa: Restrict owner-level role grants", context)
+        self.assertIn("Only owners may grant", context)
+        self.assertIn("No description; code changes:\nFile: src/player.ts", context)
+        self.assertNotIn("Merge pull request", context)
+
+    def test_context_stays_within_budget(self):
+        commits = [
+            {"sha": f"{index:040x}", "subject": f"Change {index}", "body": "word " * 2000}
+            for index in range(1, 15)
+        ]
+        context = notes.build_commit_context(commits, budget=8000)
+        self.assertLessEqual(len(context), 8000 + 15 * len("\n(…truncated)"))
+        self.assertEqual(context.count("### Commit "), 14)
+
+    def test_links_commit_citations(self):
+        links = {"3f2a9c1": "https://github.com/example/repo/commit/3f2a9c1aaa"}
+        summary = "\n".join([
+            "- Added log levels (3F2A9C1aaaa).",
+            "- Invented feature (deadbee)",
+            "- Uncited bullet",
+        ])
+        self.assertEqual(
+            notes.link_commit_citations(summary, links).splitlines(),
+            [
+                "- Added log levels ([3f2a9c1](https://github.com/example/repo/commit/3f2a9c1aaa))",
+                "- Uncited bullet",
+            ],
+        )
+
+
+class CodeContextTest(unittest.TestCase):
+    def test_reviewable_code(self):
+        for path in ("api/internal/heartbeat/cache.go", "kerberos.ng/src/assets/i18n/en.json",
+                     "charts/hub/templates/api.yaml", "src/app/videowall.component.ts"):
+            self.assertTrue(notes.is_reviewable_code(path), path)
+        for path in ("api/internal/heartbeat/cache_test.go", "go.sum", "api/docs/swagger.json", "api/docs/docs.go",
+                     "kerberos.ng/src/assets/i18n/nl.json", "src/app/tile.component.spec.ts",
+                     ".github/workflows/ci.yml", "web/package-lock.json", "tests/test_upload.py"):
+            self.assertFalse(notes.is_reviewable_code(path), path)
+
+    def test_pack_sections_respects_budget_and_order(self):
+        chunks = notes.pack_sections(["a" * 40, "b" * 40, "c" * 40, "d" * 500], 100)
+        self.assertEqual(chunks[0], "a" * 40 + "\n" + "b" * 40)
+        self.assertTrue(chunks[1].startswith("c" * 40))
+        self.assertTrue(all(len(chunk) <= 100 + len("\n(…truncated)") for chunk in chunks))
+
+    def test_reads_every_part_and_drops_tests(self):
+        files = [
+            {"filename": "api/a.go", "status": "modified", "additions": 1, "deletions": 0, "patch": "+a" * 9000},
+            {"filename": "api/b.go", "status": "modified", "additions": 1, "deletions": 0, "patch": "+b" * 9000},
+            {"filename": "api/a_test.go", "status": "added", "additions": 1, "deletions": 0, "patch": "+t" * 9000},
+            {"filename": "api/big.go", "status": "modified", "additions": 900, "deletions": 3},
+        ]
+        response = mock.Mock(status_code=200)
+        response.json.return_value = {"total_commits": 4, "files": files}
+        replies = iter(["- api/a.go: new endpoint", "No behavior changes."])
+        with mock.patch.object(notes.requests, "get", return_value=response), \
+                mock.patch.object(notes, "complete_chat", side_effect=lambda *_: next(replies)) as chat:
+            context, stats = notes.get_code_context("https://api.github.com", "example/repo", "v1", "v2", {}, {})
+        self.assertEqual(chat.call_count, 2)
+        prompts = [call.args[0][1]["content"] for call in chat.call_args_list]
+        self.assertTrue(all("a_test.go" not in prompt for prompt in prompts))
+        self.assertIn("- api/a.go: new endpoint", context)
+        self.assertNotIn("No behavior changes", context)
+        self.assertIn("api/big.go (+900/-3)", context)
+        self.assertEqual(stats["files_changed"], 4)
+
+    def test_condense_merges_notes_until_they_fit(self):
+        parts = [f"Part {index}:\n" + "- change\n" * 50 for index in range(6)]
+        with mock.patch.object(notes, "complete_chat", return_value="- merged change") as chat:
+            condensed = notes.condense_notes(parts, "example/repo", {}, budget=1000)
+        self.assertGreater(chat.call_count, 0)
+        self.assertLessEqual(len(condensed), 1000)
+        self.assertIn("- merged change", condensed)
+
+
 if __name__ == "__main__":
     unittest.main()

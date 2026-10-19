@@ -61,7 +61,7 @@ inputs:
     required: false
     default: 'false'
   context_source:
-    description: 'What each repository summary is built from: "diff" (raw file patches and commit subjects) or "pull_requests" (titles and descriptions of the pull requests merged between the two releases, with each bullet linked to its pull requests)'
+    description: 'What each repository summary is built from: "diff" (raw file patches and commit subjects, cut at ~32k characters), "pull_requests" (titles and descriptions of the merged pull requests, each bullet linked to its pull requests), "commits" (full commit messages, each bullet linked to its commits; commits without a description contribute their code) or "code" (the whole code diff without tests and generated files, summarized part by part and then combined)'
     required: false
     default: 'diff'
   exclude_labels:
